@@ -5,12 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>DMAN Web Remote</title>
 
-  <!-- iOS Safari Web App (PWA) Meta Tags -->
+  <!-- iOS Safari Web App Meta Tags -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="DMAN Remote">
   <meta name="theme-color" content="#181A1D">
-  <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/ViolinMai/DMAN/main/ui/Theme.qml">
 
   <style>
     :root {
@@ -121,7 +120,7 @@
       background: var(--bg-input);
       border: 1px solid var(--border-subtle);
       color: var(--text-main);
-      padding: 10px 12px;
+      padding: 9px 12px;
       border-radius: 6px;
       font-size: 0.9rem;
       appearance: none;
@@ -135,7 +134,7 @@
 
     textarea {
       width: 100%;
-      min-height: 85px;
+      min-height: 80px;
       resize: vertical;
     }
 
@@ -156,6 +155,12 @@
       border-color: var(--accent-blue);
     }
 
+    button.danger {
+      background: #422023;
+      color: var(--status-error);
+      border-color: #632e33;
+    }
+
     .stats-bar {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -173,7 +178,6 @@
       font-size: 0.7rem;
       color: var(--text-muted);
       margin-bottom: 2px;
-      letter-spacing: 0.5px;
     }
 
     .stat-value {
@@ -216,7 +220,7 @@
     }
 
     .progress-cell {
-      width: 130px;
+      width: 160px;
     }
 
     .progress-bar {
@@ -249,10 +253,32 @@
     }
 
     .actions-cell button {
-      padding: 5px 8px;
+      padding: 4px 8px;
       font-size: 0.75rem;
       margin-right: 4px;
       border-radius: 4px;
+    }
+
+    /* Explorer Styles */
+    .explorer-path-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 0.85rem;
+    }
+    .explorer-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 4px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+    .explorer-item:hover {
+      background: var(--bg-header);
     }
   </style>
 </head>
@@ -290,6 +316,7 @@
       </div>
     </div>
 
+    <!-- Add Download Links Card -->
     <div class="card">
       <h3 style="margin-bottom: 10px; font-size: 0.95rem;">Add Download Links</h3>
       <div style="display: flex; flex-direction: column; gap: 8px;">
@@ -305,16 +332,17 @@
       </div>
     </div>
 
+    <!-- Downloads Table (Order: Name -> Progress -> Size -> ...) -->
     <div class="table-container">
       <table>
         <thead>
           <tr>
             <th>Name</th>
+            <th class="progress-cell">Progress</th>
             <th>Size</th>
             <th>Status</th>
             <th>Speed</th>
             <th>ETA</th>
-            <th class="progress-cell">Progress</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -323,13 +351,33 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Simple File Explorer Card -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <h3 style="font-size: 0.95rem;">📁 File Explorer (Default Folder)</h3>
+        <button onclick="promptCreateFolder()" style="padding: 5px 10px; font-size: 0.8rem;">+ New Folder</button>
+      </div>
+
+      <div class="explorer-path-bar">
+        <span style="color: var(--text-muted);">Path: /</span>
+        <span id="explorerCurrentPath" style="font-weight: bold; color: var(--accent-blue);"></span>
+        <button id="explorerUpBtn" onclick="navigateExplorerUp()" style="padding: 2px 8px; font-size: 0.75rem; margin-left: auto; display: none;">⬆ Up</button>
+      </div>
+
+      <div id="explorerItemsContainer" style="display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto;">
+        <div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Loading files...</div>
+      </div>
+    </div>
   </main>
 
   <script>
-    // Load stored values automatically from localStorage
-    let host = (localStorage.getItem("dman_host") || "inclusive-legislative-steady-tide.trycloudflare.com").trim();
-    let token = (localStorage.getItem("dman_token") || "dman_remote_2026").trim();
+    // Empty by default - values are stored ONLY in the user's localStorage
+    let host = (localStorage.getItem("dman_host") || "").trim();
+    let token = (localStorage.getItem("dman_token") || "").trim();
     let savedDir = localStorage.getItem("dman_saved_dir") || "";
+    let currentExplorerSubpath = "";
+    let cachedFreeBytes = 0;
 
     document.getElementById("serverHost").value = host;
     document.getElementById("authToken").value = token;
@@ -338,18 +386,12 @@
     function buildBaseUrl(raw) {
       let cleaned = raw.trim();
       if (!cleaned) return "http://127.0.0.1:6801";
-
-      // If full protocol already supplied
       if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
         return cleaned.replace(/\/+$/, "");
       }
-
-      // If it is a Cloudflare Tunnel or domain name -> use https without custom port
       if (cleaned.includes("trycloudflare.com") || cleaned.includes(".")) {
         return `https://${cleaned}`.replace(/\/+$/, "");
       }
-
-      // Fallback for local IP / localhost
       return `http://${cleaned}:6801`.replace(/\/+$/, "");
     }
 
@@ -359,9 +401,11 @@
       localStorage.setItem("dman_host", host);
       localStorage.setItem("dman_token", token);
       fetchStatus();
+      loadExplorer(currentExplorerSubpath);
     }
 
     async function apiRequest(endpoint, method = "GET", body = null) {
+      if (!host) return null;
       const baseUrl = buildBaseUrl(host);
       const url = `${baseUrl}${endpoint}`;
       const headers = {
@@ -401,6 +445,7 @@
       stText.innerText = "Connected";
 
       const d = res.data;
+      cachedFreeBytes = d.freeBytes || 0;
       document.getElementById("statSpeed").innerText = d.globalSpeedStr || "0 B/s";
       document.getElementById("statActive").innerText = d.activeDownloads || 0;
       document.getElementById("statDisk").innerText = d.freeSpaceStr || "-";
@@ -425,19 +470,19 @@
         const fillClass = isDone ? "progress-fill done" : "progress-fill";
         return `
           <tr>
-            <td style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${it.name}">
+            <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${it.name}">
               ${it.name}
             </td>
-            <td>${it.sizeStr || "-"}</td>
-            <td>${it.statusDisplay || it.status}</td>
-            <td style="color: var(--accent-blue);">${it.speedStr || "-"}</td>
-            <td>${it.etaStr || "~"}</td>
             <td class="progress-cell">
               <div class="progress-bar">
                 <div class="${fillClass}" style="width: ${it.progress || 0}%;"></div>
                 <div class="progress-text">${(it.progress || 0).toFixed(0)}%</div>
               </div>
             </td>
+            <td>${it.sizeStr || "-"}</td>
+            <td>${it.statusDisplay || it.status}</td>
+            <td style="color: var(--accent-blue);">${it.speedStr || "-"}</td>
+            <td>${it.etaStr || "~"}</td>
             <td class="actions-cell">
               ${it.status === "active" ? `<button onclick="doAction('pause', '${it.gid}')">Pause</button>` : ""}
               ${it.status === "paused" ? `<button onclick="doAction('resume', '${it.gid}')">Resume</button>` : ""}
@@ -456,6 +501,17 @@
       const subfolder = document.getElementById("subfolderInput").value.trim();
       const useAD = document.getElementById("useADCheck").checked;
 
+      // Probe space requirement before initiating download
+      const probeRes = await apiRequest("/api/probe", "POST", { links: text, saveDir });
+      if (probeRes && probeRes.status === "ok") {
+        const req = probeRes.data.requiredBytes || 0;
+        const free = probeRes.data.freeBytes || cachedFreeBytes;
+        if (req > 0 && free > 0 && req > free) {
+          alert(`Not enough disk space!\nRequired: ${probeRes.data.requiredStr}\nFree Space: ${probeRes.data.freeStr}`);
+          return;
+        }
+      }
+
       if (saveDir) {
         localStorage.setItem("dman_saved_dir", saveDir);
       }
@@ -471,9 +527,93 @@
       fetchStatus();
     }
 
-    // Auto-refresh every 2 seconds
-    setInterval(fetchStatus, 2000);
+    // --- File Explorer Logic ---
+    async function loadExplorer(subpath = "") {
+      currentExplorerSubpath = subpath;
+      document.getElementById("explorerCurrentPath").innerText = subpath || "root";
+      document.getElementById("explorerUpBtn").style.display = subpath ? "inline-block" : "none";
+
+      const res = await apiRequest("/api/fs/list", "POST", { subpath });
+      const container = document.getElementById("explorerItemsContainer");
+
+      if (!res || res.status !== "ok") {
+        container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Cannot read folder.</div>';
+        return;
+      }
+
+      const items = res.items || [];
+      if (items.length === 0) {
+        container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Folder is empty.</div>';
+        return;
+      }
+
+      container.innerHTML = items.map(item => {
+        const icon = item.isDir ? "📁" : "📄";
+        return `
+          <div class="explorer-item">
+            <div style="display: flex; align-items: center; gap: 8px; flex: 1; cursor: ${item.isDir ? 'pointer' : 'default'}; overflow: hidden;"
+                 onclick="${item.isDir ? `navigateExplorerInto('${escapeHtml(item.name)}')` : ''}">
+              <span>${icon}</span>
+              <span style="font-weight: ${item.isDir ? 'bold' : 'normal'}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</span>
+              ${!item.isDir ? `<span style="font-size: 0.75rem; color: var(--text-muted); margin-left: 6px;">(${item.size})</span>` : ''}
+            </div>
+            <div style="display: flex; gap: 4px;">
+              <button onclick="promptRename('${escapeHtml(item.name)}')" style="padding: 3px 6px; font-size: 0.75rem;">Rename</button>
+              ${!item.isDir ? `<button class="danger" onclick="deleteFile('${escapeHtml(item.name)}')" style="padding: 3px 6px; font-size: 0.75rem;">Delete</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function navigateExplorerInto(folderName) {
+      const next = currentExplorerSubpath ? `${currentExplorerSubpath}/${folderName}` : folderName;
+      loadExplorer(next);
+    }
+
+    function navigateExplorerUp() {
+      if (!currentExplorerSubpath) return;
+      const parts = currentExplorerSubpath.split("/").filter(Boolean);
+      parts.pop();
+      loadExplorer(parts.join("/"));
+    }
+
+    async function promptCreateFolder() {
+      const name = prompt("Enter new folder name:");
+      if (!name || !name.trim()) return;
+      await apiRequest("/api/fs/mkdir", "POST", { subpath: currentExplorerSubpath, name: name.trim() });
+      loadExplorer(currentExplorerSubpath);
+    }
+
+    async function promptRename(oldName) {
+      const newName = prompt(`Rename "${oldName}" to:`, oldName);
+      if (!newName || !newName.trim() || newName.trim() === oldName) return;
+      await apiRequest("/api/fs/rename", "POST", { subpath: currentExplorerSubpath, oldName, newName: newName.trim() });
+      loadExplorer(currentExplorerSubpath);
+    }
+
+    async function deleteFile(name) {
+      if (!confirm(`Are you sure you want to permanently delete file "${name}"?`)) return;
+      const res = await apiRequest("/api/fs/delete", "POST", { subpath: currentExplorerSubpath, name });
+      if (res && res.status === "ok") {
+        loadExplorer(currentExplorerSubpath);
+      } else {
+        alert(res?.message || "Failed to delete file.");
+      }
+    }
+
+    function escapeHtml(str) {
+      return str.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+    }
+
+    // Auto-refresh watchdog for downloads and explorer
+    setInterval(() => {
+      fetchStatus();
+      loadExplorer(currentExplorerSubpath);
+    }, 2500);
+
     fetchStatus();
+    loadExplorer();
   </script>
 </body>
 </html>

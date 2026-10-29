@@ -170,6 +170,82 @@ class RemoteAPIServer:
                     self._send_json(200, res)
                     return
 
+                if route == "/api/fs/list":
+                    sub = str(body.get("subpath", "")).strip().strip("/\\")
+                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
+                    target = (base / sub).resolve()
+                    if not str(target).startswith(str(base.resolve())):
+                        self._send_json(403, {"status": "error", "message": "Access denied"})
+                        return
+                    items = []
+                    if target.exists() and target.is_dir():
+                        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                            items.append({
+                                "name": p.name,
+                                "isDir": p.is_dir(),
+                                "size": format_bytes(p.stat().st_size) if p.is_file() else "",
+                                "sizeBytes": p.stat().st_size if p.is_file() else 0,
+                                "modified": int(p.stat().st_mtime)
+                            })
+                    self._send_json(200, {"status": "ok", "currentPath": sub, "items": items})
+                    return
+
+                if route == "/api/fs/mkdir":
+                    sub = str(body.get("subpath", "")).strip().strip("/\\")
+                    name = str(body.get("name", "")).strip().replace("/", "").replace("\\", "")
+                    if not name:
+                        self._send_json(400, {"status": "error", "message": "Folder name required"})
+                        return
+                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
+                    target = (base / sub / name).resolve()
+                    if not str(target).startswith(str(base.resolve())):
+                        self._send_json(403, {"status": "error", "message": "Access denied"})
+                        return
+                    target.mkdir(parents=True, exist_ok=True)
+                    self._send_json(200, {"status": "ok"})
+                    return
+
+                if route == "/api/fs/rename":
+                    sub = str(body.get("subpath", "")).strip().strip("/\\")
+                    old_name = str(body.get("oldName", "")).strip().replace("/", "").replace("\\", "")
+                    new_name = str(body.get("newName", "")).strip().replace("/", "").replace("\\", "")
+                    if not old_name or not new_name:
+                        self._send_json(400, {"status": "error", "message": "Invalid names"})
+                        return
+                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
+                    src = (base / sub / old_name).resolve()
+                    dst = (base / sub / new_name).resolve()
+                    if not str(src).startswith(str(base.resolve())) or not str(dst).startswith(str(base.resolve())):
+                        self._send_json(403, {"status": "error", "message": "Access denied"})
+                        return
+                    if src.exists() and not dst.exists():
+                        src.rename(dst)
+                        self._send_json(200, {"status": "ok"})
+                    else:
+                        self._send_json(400, {"status": "error", "message": "Rename failed or target exists"})
+                    return
+
+                if route == "/api/fs/delete":
+                    sub = str(body.get("subpath", "")).strip().strip("/\\")
+                    name = str(body.get("name", "")).strip().replace("/", "").replace("\\", "")
+                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
+                    target = (base / sub / name).resolve()
+                    if not str(target).startswith(str(base.resolve())):
+                        self._send_json(403, {"status": "error", "message": "Access denied"})
+                        return
+                    if target.is_dir():
+                        self._send_json(400, {"status": "error", "message": "Folder deletion is prohibited"})
+                        return
+                    if target.is_file():
+                        try:
+                            target.unlink()
+                            self._send_json(200, {"status": "ok"})
+                        except Exception as e:
+                            self._send_json(500, {"status": "error", "message": str(e)})
+                        return
+                    self._send_json(404, {"status": "error", "message": "File not found"})
+                    return
+
                 self._send_json(404, {"status": "error", "message": "Unknown POST endpoint"})
 
         try:
