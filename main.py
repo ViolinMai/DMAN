@@ -21,7 +21,20 @@ def configure_environment() -> None:
             os.environ["QT_QPA_PLATFORM"] = "wayland;xcb"
 
 
+def get_resource_path(relative_path: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative_path
+
+
 def create_dman_tray_icon() -> QIcon:
+    custom_icon = get_resource_path("app_icon.png")
+    fallback_icon = Path("/mnt/storage/LINUX-WIN/مستودع/download.png")
+
+    if custom_icon.exists():
+        return QIcon(str(custom_icon))
+    if fallback_icon.exists():
+        return QIcon(str(fallback_icon))
+
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -98,8 +111,11 @@ def main() -> int:
     tray = setup_system_tray(app, controller)
     app.aboutToQuit.connect(controller.shutdown)
 
+    app_icon = create_dman_tray_icon()
+    app.setWindowIcon(app_icon)
+
     engine = QQmlApplicationEngine()
-    base_dir = Path(__file__).resolve().parent
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     ui_dir = base_dir / "ui"
 
     engine.addImportPath(str(ui_dir))

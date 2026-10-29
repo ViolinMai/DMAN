@@ -89,11 +89,13 @@ class SystemIntegration:
             desktop_file = autostart_dir / "dman.desktop"
             if enabled:
                 autostart_dir.mkdir(parents=True, exist_ok=True)
+                icon_path = "/mnt/storage/LINUX-WIN/مستودع/download.png"
                 content = (
                     "[Desktop Entry]\n"
                     "Type=Application\n"
                     "Name=DMAN Download Manager\n"
                     f'Exec="{python_exe}" "{main_script}" --autostart\n'
+                    f'Icon={icon_path}\n'
                     "Terminal=false\n"
                     "Categories=Network;FileTransfer;\n"
                 )

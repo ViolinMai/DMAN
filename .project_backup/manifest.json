@@ -1,6 +1,7 @@
 {
   "modified": [
-    "index.html"
+    "main.py",
+    "core/system_integration.py"
   ],
   "created": []
 }

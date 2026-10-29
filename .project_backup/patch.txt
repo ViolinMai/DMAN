@@ -1,126 +1,86 @@
-### EDIT: index.html
+### EDIT: main.py
 <<< FIND
-        <div class="row">
-          <input type="text" id="targetDirInput" placeholder="Destination path (empty for default)" style="flex: 2; min-width: 160px;">
-          <input type="text" id="subfolderInput" placeholder="+ Subfolder / Package" style="flex: 1; min-width: 120px;">
-          <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-muted); cursor: pointer;">
-            <input type="checkbox" id="useADCheck" checked> AllDebrid Unrestrict
-          </label>
-          <button class="primary" onclick="submitLinks()">Start Download</button>
-        </div>
+def create_dman_tray_icon() -> QIcon:
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QColor("#2B4257"))
+    painter.setPen(QColor("#5B9BD5"))
+    painter.drawRoundedRect(4, 4, 56, 56, 12, 12)
+    painter.setPen(QColor("#6CC644"))
+    font = painter.font()
+    font.setPixelSize(34)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, "⬇")
+    painter.end()
+    return QIcon(pixmap)
 ===
-        <div class="row">
-          <input type="text" id="targetDirInput" placeholder="Destination path (empty for default)" style="flex: 2; min-width: 160px;">
-          <button type="button" onclick="openFolderPickerModal()" style="padding: 9px 14px;">Browse...</button>
-          <input type="text" id="subfolderInput" placeholder="+ Subfolder / Package" style="flex: 1; min-width: 120px;">
-          <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-muted); cursor: pointer;">
-            <input type="checkbox" id="useADCheck" checked> AllDebrid Unrestrict
-          </label>
-          <button class="primary" onclick="submitLinks()">Start Download</button>
-        </div>
+def get_resource_path(relative_path: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / relative_path
+
+
+def create_dman_tray_icon() -> QIcon:
+    custom_icon = get_resource_path("app_icon.png")
+    fallback_icon = Path("/mnt/storage/LINUX-WIN/مستودع/download.png")
+
+    if custom_icon.exists():
+        return QIcon(str(custom_icon))
+    if fallback_icon.exists():
+        return QIcon(str(fallback_icon))
+
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QColor("#2B4257"))
+    painter.setPen(QColor("#5B9BD5"))
+    painter.drawRoundedRect(4, 4, 56, 56, 12, 12)
+    painter.setPen(QColor("#6CC644"))
+    font = painter.font()
+    font.setPixelSize(34)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, "⬇")
+    painter.end()
+    return QIcon(pixmap)
 >>>
 <<< FIND
-  </main>
-
-  <script>
+    engine = QQmlApplicationEngine()
+    base_dir = Path(__file__).resolve().parent
+    ui_dir = base_dir / "ui"
 ===
-    <!-- Folder Picker Modal -->
-    <div id="folderPickerModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; align-items: center; justify-content: center; padding: 16px;">
-      <div class="card" style="width: 100%; max-width: 520px; max-height: 85vh; display: flex; flex-direction: column; gap: 10px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h3 style="font-size: 0.95rem;">📁 Select Destination Folder</h3>
-          <button onclick="closeFolderPickerModal()" style="padding: 4px 8px; font-size: 0.8rem;">✕</button>
-        </div>
-        <div class="explorer-path-bar" style="margin-bottom: 0;">
-          <span style="color: var(--text-muted);">Folder: /</span>
-          <span id="pickerCurrentPath" style="font-weight: bold; color: var(--accent-blue);"></span>
-          <button id="pickerUpBtn" onclick="navigatePickerUp()" style="padding: 2px 8px; font-size: 0.75rem; margin-left: auto; display: none;">⬆ Up</button>
-        </div>
-        <div id="pickerItemsContainer" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 320px; min-height: 140px;">
-        </div>
-        <div class="row" style="justify-content: flex-end; margin-top: 6px;">
-          <button onclick="closeFolderPickerModal()">Cancel</button>
-          <button class="primary" onclick="confirmPickerFolder()">Choose Current Folder</button>
-        </div>
-      </div>
-    </div>
-  </main>
+    app_icon = create_dman_tray_icon()
+    app.setWindowIcon(app_icon)
 
-  <script>
+    engine = QQmlApplicationEngine()
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    ui_dir = base_dir / "ui"
 >>>
+### END
+
+### EDIT: core/system_integration.py
 <<< FIND
-    async function doAction(action, gid) {
-      await apiRequest("/api/action", "POST", { action, gid });
-      fetchStatus();
-    }
+                content = (
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=DMAN Download Manager\n"
+                    f'Exec="{python_exe}" "{main_script}" --autostart\n'
+                    "Terminal=false\n"
+                    "Categories=Network;FileTransfer;\n"
+                )
 ===
-    async function doAction(action, gid) {
-      await apiRequest("/api/action", "POST", { action, gid });
-      fetchStatus();
-    }
-
-    // --- Folder Picker Modal Logic ---
-    let pickerSubpath = "";
-
-    function openFolderPickerModal() {
-      pickerSubpath = "";
-      document.getElementById("folderPickerModal").style.display = "flex";
-      loadPickerFolders("");
-    }
-
-    function closeFolderPickerModal() {
-      document.getElementById("folderPickerModal").style.display = "none";
-    }
-
-    async function loadPickerFolders(subpath = "") {
-      pickerSubpath = subpath;
-      document.getElementById("pickerCurrentPath").innerText = subpath || "root";
-      document.getElementById("pickerUpBtn").style.display = subpath ? "inline-block" : "none";
-
-      const res = await apiRequest("/api/fs/list", "POST", { subpath });
-      const container = document.getElementById("pickerItemsContainer");
-
-      if (!res || res.status !== "ok") {
-        container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Cannot read folder.</div>';
-        return;
-      }
-
-      const folders = (res.items || []).filter(item => item.isDir);
-      if (folders.length === 0) {
-        container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">No subfolders inside. Click "Choose Current Folder" below to select this path.</div>';
-        return;
-      }
-
-      container.innerHTML = folders.map(folder => `
-        <div class="explorer-item" style="cursor: pointer;" onclick="navigatePickerInto('${escapeHtml(folder.name)}')">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span>📁</span>
-            <span style="font-weight: bold;">${escapeHtml(folder.name)}</span>
-          </div>
-          <span style="color: var(--accent-blue); font-size: 0.8rem;">Open ➔</span>
-        </div>
-      `).join("");
-    }
-
-    function navigatePickerInto(name) {
-      const next = pickerSubpath ? `${pickerSubpath}/${name}` : name;
-      loadPickerFolders(next);
-    }
-
-    function navigatePickerUp() {
-      if (!pickerSubpath) return;
-      const parts = pickerSubpath.split("/").filter(Boolean);
-      parts.pop();
-      loadPickerFolders(parts.join("/"));
-    }
-
-    async function confirmPickerFolder() {
-      const stateRes = await apiRequest("/api/status");
-      const baseDir = (stateRes && stateRes.data && stateRes.data.defaultSaveDir) ? stateRes.data.defaultSaveDir.replace(/[\/\\]+$/, "") : "";
-      const chosen = pickerSubpath ? `${baseDir}/${pickerSubpath}` : baseDir;
-      document.getElementById("targetDirInput").value = chosen;
-      localStorage.setItem("dman_saved_dir", chosen);
-      closeFolderPickerModal();
-    }
+                icon_path = "/mnt/storage/LINUX-WIN/مستودع/download.png"
+                content = (
+                    "[Desktop Entry]\n"
+                    "Type=Application\n"
+                    "Name=DMAN Download Manager\n"
+                    f'Exec="{python_exe}" "{main_script}" --autostart\n'
+                    f'Icon={icon_path}\n'
+                    "Terminal=false\n"
+                    "Categories=Network;FileTransfer;\n"
+                )
 >>>
 ### END
