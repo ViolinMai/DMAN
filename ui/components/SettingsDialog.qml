@@ -51,6 +51,7 @@ Popup {
 
         root.pinCodeDisplay = ""
         root.pinUrlDisplay = ""
+        root.controller.refreshDebugLogs()
         root.open()
     }
 
@@ -98,7 +99,8 @@ Popup {
                 model: [
                     "1. Engine & AllDebrid",
                     "2. System & Watchdog",
-                    "3. Notifications"
+                    "3. Notifications",
+                    "4. Logs & Debugging"
                 ]
 
                 delegate: Rectangle {
@@ -750,6 +752,117 @@ Popup {
                     }
 
                     Item { Layout.fillHeight: true }
+                }
+            }
+        }
+
+        // TAB 3: Logs & Debugging
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: root.currentTab === 3
+            spacing: 8
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Text {
+                    text: "Live Application & API Debug Logs"
+                    color: Theme.accentBlue
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: true
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Rectangle {
+                    implicitWidth: 90
+                    implicitHeight: 26
+                    radius: Theme.radiusSmall
+                    color: Theme.bgHeader
+                    border.color: Theme.borderSubtle
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "↻ Refresh"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.controller.refreshDebugLogs()
+                    }
+                }
+
+                Rectangle {
+                    implicitWidth: 80
+                    implicitHeight: 26
+                    radius: Theme.radiusSmall
+                    color: Theme.bgHeader
+                    border.color: Theme.borderSubtle
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Clear"
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeSmall
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.controller.clearDebugLogs()
+                    }
+                }
+
+                Rectangle {
+                    implicitWidth: 120
+                    implicitHeight: 26
+                    radius: Theme.radiusSmall
+                    color: Theme.bgHeader
+                    border.color: Theme.borderFocus
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Copy All Logs"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.controller.copyLogsToClipboard(debugLogArea.text)
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.bgInput
+                radius: Theme.radiusSmall
+                border.color: Theme.borderSubtle
+
+                ScrollView {
+                    anchors.fill: parent
+                    anchors.margins: 6
+
+                    TextArea {
+                        id: debugLogArea
+                        readOnly: true
+                        selectByMouse: true
+                        text: root.controller.debugLogsText
+                        color: Theme.textPrimary
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        wrapMode: TextEdit.WrapAnywhere
+                        background: null
+                    }
                 }
             }
         }

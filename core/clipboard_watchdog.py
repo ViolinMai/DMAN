@@ -1,3 +1,6 @@
+import shutil
+import subprocess
+import sys
 from typing import Callable, List, Set
 from urllib.parse import urlparse
 
@@ -33,11 +36,38 @@ class ClipboardWatchdog(QObject):
         self._clipboard = QGuiApplication.clipboard()
         self._clipboard.dataChanged.connect(self._check_clipboard)
 
-        # Fallback poll every 1500ms for Wayland compositors where clipboard signals only fire on focus
+        self._wl_paste_bin = shutil.which("wl-paste") if sys.platform.startswith("linux") else None
+
+        # Ultra-fast 250ms poll so background daemon catches links instantaneously
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(1500)
+        self._poll_timer.setInterval(250)
         self._poll_timer.timeout.connect(self._check_clipboard)
         self._poll_timer.start()
+
+    def clear_seen_links(self) -> None:
+        self._seen_links.clear()
+        self._last_raw_text = ""
+
+    def _read_clipboard_fast(self) -> str:
+        try:
+            text = self._clipboard.text() or ""
+            if text:
+                return text
+        except Exception:
+            pass
+        if self._wl_paste_bin:
+            try:
+                res = subprocess.run(
+                    [self._wl_paste_bin, "--no-newline"],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.15,
+                )
+                if res.returncode == 0 and res.stdout:
+                    return res.stdout
+            except Exception:
+                pass
+        return ""
 
     def _is_alldebrid_link(self, link: str, supported_domains: List[str]) -> bool:
         low = link.lower()
@@ -47,6 +77,8 @@ class ClipboardWatchdog(QObject):
         host = (parsed.hostname or "").lower()
         if not host:
             return False
+        if host.endswith(".debrid.it") or host.endswith(".alldeb.ovh") or "alldebrid." in host:
+            return True
         for dom in supported_domains:
             d = dom.lower()
             if host == d or host.endswith("." + d):
@@ -58,10 +90,7 @@ class ClipboardWatchdog(QObject):
         if mode == "disabled":
             return
 
-        try:
-            text = self._clipboard.text() or ""
-        except Exception:
-            return
+        text = self._read_clipboard_fast()
 
         if not text or text == self._last_raw_text or len(text) > 32768:
             return

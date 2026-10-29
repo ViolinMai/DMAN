@@ -1,0 +1,131 @@
+### EDIT: backend/alldebrid_api.py
+<<< FIND
+    def probe_links_metadata(self, links: List[str]) -> Dict[str, Any]:
+        """
+        Probes link names and total sizes safely using /v4/link/infos (or direct URL parsing
+        for already-unrestricted CDN links) without burning download quotas.
+        """
+        total_bytes = 0
+        items: List[Dict[str, Any]] = []
+        hoster_Batch: List[str] = []
+
+        for link in links[:15]:
+            low = link.lower()
+            if low.startswith("magnet:?"):
+                items.append({"link": link, "filename": "Magnet Link", "size": 0, "type": "magnet"})
+            elif self.is_direct_cdn_link(link):
+                fn = self.extract_url_filename(link) or "Direct Debrid File"
+                items.append({
+                    "link": link,
+                    "directLink": link,
+                    "filename": fn,
+                    "size": 0,
+                    "host": "AllDebrid CDN",
+                    "type": "direct_cdn",
+                })
+            else:
+                hoster_Batch.append(link)
+
+        if hoster_Batch and self._api_key:
+            try:
+                infos = self.get_link_infos(hoster_Batch)
+                for info in infos:
+                    if "error" in info:
+                        orig = info.get("link", "")
+                        fn = self.extract_url_filename(orig) or orig
+                        items.append({"link": orig, "filename": fn, "size": 0, "type": "direct"})
+                    else:
+                        sz = int(info.get("size", 0) or 0)
+                        fn = info.get("filename") or self.extract_url_filename(info.get("link", ""))
+                        total_bytes += sz
+                        items.append({
+                            "link": info.get("link", ""),
+                            "filename": fn,
+                            "size": sz,
+                            "host": info.get("host", "AllDebrid"),
+                            "type": "alldebrid",
+                        })
+                return {"totalBytes": total_bytes, "items": items}
+            except Exception as exc:
+                _ad_logger.debug("Probe /v4/link/infos fallback: %s", exc)
+
+        for link in hoster_Batch:
+            fn = self.extract_url_filename(link) or link
+            items.append({"link": link, "filename": fn, "size": 0, "type": "direct"})
+        return {"totalBytes": total_bytes, "items": items}
+                    sz = int(info.get("filesize", 0) or 0)
+                    fn = info.get("filename") or link.split("/")[-1]
+                    total_bytes += sz
+                    items.append(
+                        {
+                            "link": link,
+                            "directLink": info.get("link", ""),
+                            "filename": fn,
+                            "size": sz,
+                            "host": info.get("host", "AllDebrid"),
+                            "type": "alldebrid",
+                        }
+                    )
+                    continue
+                except Exception:
+                    pass
+            parsed_name = urllib.parse.unquote(urllib.parse.urlparse(link).path.split("/")[-1]).strip() or link
+            items.append({"link": link, "filename": parsed_name, "size": 0, "type": "direct"})
+        return {"totalBytes": total_bytes, "items": items}
+===
+    def probe_links_metadata(self, links: List[str]) -> Dict[str, Any]:
+        """
+        Probes link names and total sizes safely using /v4/link/infos (or direct URL parsing
+        for already-unrestricted CDN links) without burning download quotas.
+        """
+        total_bytes = 0
+        items: List[Dict[str, Any]] = []
+        hoster_batch: List[str] = []
+
+        for link in links[:15]:
+            low = link.lower()
+            if low.startswith("magnet:?"):
+                items.append({"link": link, "filename": "Magnet Link", "size": 0, "type": "magnet"})
+            elif self.is_direct_cdn_link(link):
+                fn = self.extract_url_filename(link) or "Direct Debrid File"
+                items.append({
+                    "link": link,
+                    "directLink": link,
+                    "filename": fn,
+                    "size": 0,
+                    "host": "AllDebrid CDN",
+                    "type": "direct_cdn",
+                })
+            else:
+                hoster_batch.append(link)
+
+        if hoster_batch and self._api_key:
+            try:
+                infos = self.get_link_infos(hoster_batch)
+                for info in infos:
+                    if "error" in info:
+                        orig = info.get("link", "")
+                        fn = self.extract_url_filename(orig) or orig
+                        items.append({"link": orig, "filename": fn, "size": 0, "type": "direct"})
+                    else:
+                        sz = int(info.get("size", 0) or 0)
+                        fn = info.get("filename") or self.extract_url_filename(info.get("link", ""))
+                        total_bytes += sz
+                        items.append({
+                            "link": info.get("link", ""),
+                            "filename": fn,
+                            "size": sz,
+                            "host": info.get("host", "AllDebrid"),
+                            "type": "alldebrid",
+                        })
+                return {"totalBytes": total_bytes, "items": items}
+            except Exception as exc:
+                _ad_logger.debug("Probe /v4/link/infos fallback: %s", exc)
+
+        for link in hoster_batch:
+            fn = self.extract_url_filename(link) or link
+            items.append({"link": link, "filename": fn, "size": 0, "type": "direct"})
+
+        return {"totalBytes": total_bytes, "items": items}
+>>>
+### END

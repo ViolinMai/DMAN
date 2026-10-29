@@ -79,6 +79,14 @@ def setup_system_tray(app: QApplication, controller: AppController) -> QSystemTr
 
 
 def main() -> int:
+    # Route to headless CLI mode if invoked with 'cli' subcommand or CLI flags
+    if len(sys.argv) > 1 and sys.argv[1] == "cli":
+        from cli.cli_runner import run_cli
+        return run_cli(sys.argv[2:])
+
+    from cli.logger import setup_cli_logging
+    setup_cli_logging(debug=True)
+
     configure_environment()
 
     app = QApplication(sys.argv)

@@ -79,10 +79,11 @@ class Aria2RPCClient:
         except OSError:
             return False
 
-        for _ in range(15):
+        import time
+        for _ in range(25):
             if self.ping():
                 return True
-            QThread.msleep(100)
+            time.sleep(0.1)
 
         return False
 

@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Callable, Dict, Optional
 
 from PySide6.QtWidgets import QSystemTrayIcon
 
@@ -27,8 +27,14 @@ class SystemIntegration:
     def send_os_notification(
         title: str,
         body: str,
-        tray_icon: QSystemTrayIcon = None,
+        tray_icon: Optional[QSystemTrayIcon] = None,
     ) -> None:
+        # Prefer QSystemTrayIcon balloon/notification when available so clicking the notification
+        # triggers QSystemTrayIcon.messageClicked -> opens DMAN with pre-staged links immediately.
+        if tray_icon is not None and tray_icon.isVisible() and tray_icon.supportsMessages():
+            tray_icon.showMessage(title, body, QSystemTrayIcon.Information, 5000)
+            return
+
         if sys.platform.startswith("linux"):
             notify_bin = shutil.which("notify-send")
             if notify_bin:
@@ -38,12 +44,40 @@ class SystemIntegration:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    return
                 except Exception:
                     pass
 
-        if tray_icon is not None and tray_icon.isVisible():
-            tray_icon.showMessage(title, body, QSystemTrayIcon.Information, 4000)
+    @staticmethod
+    def open_url_safe(url_str: str) -> None:
+        """Opens a web URL in the user's browser without triggering x-www-browser errors on Wayland."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        if sys.platform.startswith("linux"):
+            for candidate in ("xdg-open", "firefox", "google-chrome-stable", "chromium", "brave"):
+                bin_path = shutil.which(candidate)
+                if bin_path:
+                    try:
+                        subprocess.Popen(
+                            [bin_path, url_str],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        return
+                    except Exception:
+                        pass
+        QDesktopServices.openUrl(QUrl(url_str))
+
+    @staticmethod
+    def get_disk_free_bytes(folder_path: str) -> int:
+        try:
+            target = Path(folder_path.strip() or Path.home())
+            while not target.exists() and target.parent != target:
+                target = target.parent
+            usage = shutil.disk_usage(str(target))
+            return int(usage.free)
+        except Exception:
+            return 0
 
     @staticmethod
     def set_autostart(enabled: bool) -> None:

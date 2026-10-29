@@ -9,8 +9,8 @@ Popup {
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     anchors.centerIn: Overlay.overlay
-    width: Math.min(640, parent ? parent.width - 40 : 640)
-    height: 380
+    width: Math.min(680, parent ? parent.width - 40 : 680)
+    height: 450
     padding: 0
 
     required property var controller
@@ -20,22 +20,44 @@ Popup {
     property int detectedMagnets: 0
     property bool makeDefaultDir: false
     property bool routeViaAlldebrid: true
+    property string freeDiskSpace: ""
 
     function refreshLinkStats() {
         var stats = root.controller.analyzeLinksText(urlInput.text)
         root.detectedTotal = stats.total || 0
         root.detectedHttp = stats.httpCount || 0
         root.detectedMagnets = stats.magnetCount || 0
+        root.freeDiskSpace = root.controller.getDiskFreeSpaceStr(saveDirInput.text)
+    }
+
+    function startImmediateDownload(targetDir) {
+        if (root.detectedTotal <= 0) return
+        var finalDir = targetDir ? targetDir : saveDirInput.text
+        if (subfolderInput.text.trim() !== "") {
+            finalDir = finalDir.replace(/[\/\\]+$/, "") + "/" + subfolderInput.text.trim()
+        }
+        root.controller.addLinks(
+            urlInput.text,
+            finalDir,
+            root.makeDefaultDir,
+            root.routeViaAlldebrid
+        )
+        root.close()
     }
 
     function openWithFocus(prefillText) {
         urlInput.text = prefillText ? prefillText : ""
         saveDirInput.text = root.controller.defaultSaveDir
+        subfolderInput.text = ""
         root.makeDefaultDir = false
         root.routeViaAlldebrid = root.controller.alldebridEnabled
         root.refreshLinkStats()
         root.open()
-        urlInput.forceActiveFocus()
+        if (prefillText && prefillText.length > 0) {
+            saveDirInput.forceActiveFocus()
+        } else {
+            urlInput.forceActiveFocus()
+        }
     }
 
     background: Rectangle {
@@ -131,11 +153,33 @@ Popup {
                 selectByMouse: true
                 leftPadding: 8
                 rightPadding: 8
+                onTextChanged: root.freeDiskSpace = root.controller.getDiskFreeSpaceStr(text)
+                onAccepted: root.startImmediateDownload(saveDirInput.text)
 
                 background: Rectangle {
                     color: Theme.bgInput
                     radius: Theme.radiusSmall
                     border.color: saveDirInput.activeFocus ? Theme.borderFocus : Theme.borderSubtle
+                }
+            }
+
+            TextField {
+                id: subfolderInput
+                Layout.preferredWidth: 150
+                Layout.preferredHeight: 28
+                placeholderText: "+ Subfolder (optional)"
+                placeholderTextColor: Theme.textMuted
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeNormal
+                selectByMouse: true
+                leftPadding: 8
+                rightPadding: 8
+                onAccepted: root.startImmediateDownload(saveDirInput.text)
+
+                background: Rectangle {
+                    color: Theme.bgInput
+                    radius: Theme.radiusSmall
+                    border.color: subfolderInput.activeFocus ? Theme.borderFocus : Theme.borderSubtle
                 }
             }
 
@@ -166,6 +210,63 @@ Popup {
                     }
                 }
             }
+        }
+
+        // Quick 1-Click Recent Folders Bar + Disk Free Space Indicator
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+
+            Text {
+                text: "Free Space: " + root.freeDiskSpace
+                color: Theme.statusFinished
+                font.pixelSize: Theme.fontSizeSmall
+                font.bold: true
+            }
+
+            Text {
+                text: "| Quick Start in:"
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSizeSmall
+                visible: root.controller.recentDownloadDirs.length > 0
+            }
+
+            Repeater {
+                model: root.controller.recentDownloadDirs
+                delegate: Rectangle {
+                    implicitWidth: Math.min(160, qDirTxt.implicitWidth + 14)
+                    implicitHeight: 22
+                    radius: Theme.radiusSmall
+                    color: qDirMouse.containsMouse ? Theme.rowSelected : Theme.bgHeader
+                    border.color: Theme.borderSubtle
+
+                    Text {
+                        id: qDirTxt
+                        anchors.centerIn: parent
+                        width: parent.width - 10
+                        text: modelData.split(/[\/\\]/).pop() || modelData
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeSmall
+                        elide: Text.ElideMiddle
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+
+                    MouseArea {
+                        id: qDirMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            saveDirInput.text = modelData
+                            if (root.detectedTotal > 0) {
+                                root.startImmediateDownload(modelData)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Item { Layout.fillWidth: true }
         }
 
         // Options Row: Set as Default Folder + Use AllDebrid
@@ -322,17 +423,7 @@ Popup {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: root.detectedTotal > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: {
-                        if (root.detectedTotal > 0) {
-                            root.controller.addLinks(
-                                urlInput.text,
-                                saveDirInput.text,
-                                root.makeDefaultDir,
-                                root.routeViaAlldebrid
-                            )
-                            root.close()
-                        }
-                    }
+                    onClicked: root.startImmediateDownload(saveDirInput.text)
                 }
             }
         }

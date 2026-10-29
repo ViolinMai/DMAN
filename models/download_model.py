@@ -1,4 +1,6 @@
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
@@ -10,6 +12,7 @@ from PySide6.QtCore import (
     Slot,
 )
 
+from core.config import AppConfig
 from core.formatters import (
     format_bytes,
     format_eta,
@@ -55,6 +58,45 @@ class DownloadModel(QAbstractListModel):
         self._rows: List[Dict[str, Any]] = []
         self._collapsed_packages: Set[str] = set()
         self._source_uri_cache: Dict[str, str] = {}
+        self._history_file: Path = AppConfig.get_state_file()
+        self._permanent_history: Dict[str, Dict[str, Any]] = {}
+        self._load_permanent_history()
+        if self._permanent_history:
+            self.sync_items([])
+
+    def _load_permanent_history(self) -> None:
+        if not self._history_file.exists():
+            return
+        try:
+            raw = json.loads(self._history_file.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for gid, entry in raw.items():
+                    if isinstance(entry, dict) and entry.get("gid"):
+                        self._permanent_history[gid] = entry
+                        if entry.get("sourceUri"):
+                            self._source_uri_cache[gid] = entry["sourceUri"]
+        except Exception:
+            self._permanent_history = {}
+
+    def _save_permanent_history(self) -> None:
+        try:
+            self._history_file.parent.mkdir(parents=True, exist_ok=True)
+            self._history_file.write_text(
+                json.dumps(self._permanent_history, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def remove_from_history(self, gid: str) -> None:
+        changed = False
+        if gid in self._permanent_history:
+            del self._permanent_history[gid]
+            changed = True
+        self._source_uri_cache.pop(gid, None)
+        if changed:
+            self._save_permanent_history()
+            self.sync_items([])
 
     def roleNames(self) -> Dict[int, bytes]:
         return {
@@ -131,9 +173,40 @@ class DownloadModel(QAbstractListModel):
     def is_package_collapsed(self, package_key: str) -> bool:
         return package_key in self._collapsed_packages
 
-    def register_source_uri(self, gid: str, uri: str) -> None:
+    def register_source_uri(self, gid: str, uri: str, save_dir: str = "", custom_filename: str = "") -> None:
         if gid and uri:
             self._source_uri_cache[gid] = uri
+            if gid in self._permanent_history:
+                self._permanent_history[gid]["sourceUri"] = uri
+                self._save_permanent_history()
+
+    def _refresh_stored_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        updated = dict(entry)
+        primary_path = updated.get("primaryPath", "")
+        if not primary_path and updated.get("saveDir") and updated.get("name"):
+            primary_path = str(Path(updated["saveDir"]) / updated["name"])
+            updated["primaryPath"] = primary_path
+
+        file_exists = True
+        if primary_path:
+            file_exists = Path(primary_path).exists() or Path(primary_path + ".aria2").exists()
+        updated["fileExists"] = file_exists
+        updated["speedStr"] = ""
+        updated["etaStr"] = "~"
+        updated["connections"] = 0
+        updated["rawSpeedBps"] = 0
+
+        st = updated.get("status", "complete")
+        if st in ("complete", "missing"):
+            updated["status"] = "complete"
+            updated["statusDisplay"] = "Finished" if file_exists else "Finished (Deleted from Disk)"
+            updated["progress"] = 100.0
+        elif st in ("active", "waiting"):
+            updated["status"] = "paused"
+            updated["statusDisplay"] = "Paused (Session)" if file_exists else "Interrupted (File Missing)"
+        elif st == "paused":
+            updated["statusDisplay"] = "Paused (Resumable)" if file_exists else "Paused (Missing File)"
+        return updated
 
     def _transform_child(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         gid = raw.get("gid", "")
@@ -147,6 +220,10 @@ class DownloadModel(QAbstractListModel):
         is_meta = is_metadata_only_task(raw)
 
         primary_path = resolve_primary_file_path(raw)
+        name = resolve_display_name(raw)
+        if not primary_path and save_dir and name and not name.startswith("Task #"):
+            primary_path = str(Path(save_dir) / name)
+
         file_exists = True
         if primary_path and status in ("complete", "paused"):
             file_exists = Path(primary_path).exists() or Path(primary_path + ".aria2").exists()
@@ -166,7 +243,7 @@ class DownloadModel(QAbstractListModel):
             "active": "Fetching Metadata" if is_meta else "Downloading",
             "waiting": "Queued",
             "paused": "Paused (Resumable)" if file_exists else "Paused (Missing File)",
-            "complete": "Finished" if file_exists else "Missing on Disk",
+            "complete": "Finished" if file_exists else "Finished (Deleted from Disk)",
             "error": f"Error ({raw.get('errorCode', '?')})",
             "removed": "Removed",
         }
@@ -175,10 +252,11 @@ class DownloadModel(QAbstractListModel):
 
         return {
             "gid": gid,
-            "name": resolve_display_name(raw),
+            "name": name,
+            "primaryPath": primary_path,
             "sizeStr": format_bytes(total_bytes) if total_bytes > 0 else ("Metadata" if is_meta else "Resolving..."),
             "completedStr": format_bytes(completed_bytes),
-            "status": "missing" if (status == "complete" and not file_exists) else status,
+            "status": status,
             "statusDisplay": status_labels.get(status, status.capitalize()),
             "speedStr": format_speed(speed_bps) if status == "active" else "",
             "etaStr": format_eta(total_bytes, completed_bytes, speed_bps) if (status == "active" and not is_meta) else "~",
@@ -195,6 +273,7 @@ class DownloadModel(QAbstractListModel):
             "childCount": 0,
             "sourceUri": source_uri,
             "fileExists": file_exists,
+            "updatedAt": int(time.time()),
         }
 
     def _build_package_header(self, pkg_key: str, children: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -255,10 +334,39 @@ class DownloadModel(QAbstractListModel):
             r for r in raw_items
             if not (is_metadata_only_task(r) and r.get("status") in ("complete", "removed"))
         ]
-        children = [self._transform_child(r) for r in filtered_raw]
+        live_children = [self._transform_child(r) for r in filtered_raw]
+
+        history_dirty = False
+        live_by_gid: Dict[str, Dict[str, Any]] = {}
+        for child in live_children:
+            gid = child["gid"]
+            if not gid:
+                continue
+            live_by_gid[gid] = child
+            if not child["name"].startswith("Fetching Metadata"):
+                prev = self._permanent_history.get(gid)
+                if prev is None or (
+                    prev.get("status") != child.get("status")
+                    or prev.get("rawCompletedBytes") != child.get("rawCompletedBytes")
+                    or prev.get("rawTotalBytes") != child.get("rawTotalBytes")
+                    or prev.get("name") != child.get("name")
+                    or prev.get("saveDir") != child.get("saveDir")
+                ):
+                    self._permanent_history[gid] = dict(child)
+                    history_dirty = True
+
+        if history_dirty:
+            self._save_permanent_history()
+
+        # Merge live items with permanent history so finished or past downloads NEVER disappear
+        # unless explicitly removed by the user in DMAN (even if deleted from OS disk).
+        merged_children: List[Dict[str, Any]] = list(live_children)
+        for saved_gid, saved_entry in self._permanent_history.items():
+            if saved_gid not in live_by_gid:
+                merged_children.append(self._refresh_stored_entry(saved_entry))
 
         packages_map: Dict[str, List[Dict[str, Any]]] = {}
-        for child in children:
+        for child in merged_children:
             pk = child["packageKey"]
             if pk not in packages_map:
                 packages_map[pk] = []

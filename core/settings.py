@@ -30,7 +30,12 @@ class SettingsManager:
         "notify_title_template": "DMAN - {event}",
         "notify_complete_template": "Finished downloading: {name} ({dir})",
         "notify_error_template": "Download failed: {name} - {error}",
-        "notify_clipboard_template": "Captured {count} download link(s) from clipboard",
+        "notify_clipboard_template": "Captured {count} download link(s) — Click to choose path & start",
+        # Remote Web API Server
+        "remote_api_enabled": True,
+        "remote_api_port": AppConfig.REMOTE_HTTP_PORT,
+        "remote_api_token": "dman_remote_2026",
+        "recent_download_dirs": [],
     }
 
     def __init__(self) -> None:

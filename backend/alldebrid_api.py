@@ -1,16 +1,22 @@
+import gzip
 import json
 import random
+import ssl
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import logging
+import zlib
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QThread, Signal
 
 from core.config import AppConfig
+
+_ad_logger = logging.getLogger("DMAN.AllDebrid")
 
 
 class AllDebridError(Exception):
@@ -144,27 +150,54 @@ class AllDebridClient:
 
         self._limiter.acquire(requires_auth=requires_auth)
 
+        merged_params: Dict[str, Any] = {"agent": AppConfig.ALLDEBRID_AGENT}
+        if params:
+            merged_params.update(params)
+        if requires_auth and self._api_key:
+            merged_params.setdefault("apikey", self._api_key)
+
         url = f"{AppConfig.ALLDEBRID_BASE_URL}{endpoint}"
         headers = {
-            "Accept": "application/json",
-            "User-Agent": f"DMAN/{AppConfig.APP_VERSION}",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
         }
         if requires_auth and self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         data_bytes: Optional[bytes] = None
         if method.upper() == "POST":
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-            data_bytes = self._encode_post_params(params or {})
-        elif params:
-            query_str = urllib.parse.urlencode(params)
+            headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+            data_bytes = self._encode_post_params(merged_params)
+        else:
+            query_str = urllib.parse.urlencode(merged_params, doseq=True)
             url = f"{url}?{query_str}"
 
+        _ad_logger.debug("API Request: %s %s", method.upper(), endpoint)
         req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method.upper())
+        ssl_ctx = ssl.create_default_context()
+
+        def _decode_response_bytes(raw_bytes: bytes, content_encoding: str) -> str:
+            enc = (content_encoding or "").lower()
+            if "gzip" in enc or raw_bytes.startswith(b"\x1f\x8b"):
+                try:
+                    raw_bytes = gzip.decompress(raw_bytes)
+                except Exception:
+                    pass
+            elif "deflate" in enc:
+                try:
+                    raw_bytes = zlib.decompress(raw_bytes)
+                except Exception:
+                    pass
+            return raw_bytes.decode("utf-8-sig", errors="replace").strip()
 
         try:
-            with urllib.request.urlopen(req, timeout=12.0) as resp:
-                raw_body = resp.read().decode("utf-8")
+            with urllib.request.urlopen(req, timeout=15.0, context=ssl_ctx) as resp:
+                raw_body = _decode_response_bytes(resp.read(), resp.headers.get("Content-Encoding", ""))
         except urllib.error.HTTPError as http_err:
             if http_err.code in (429, 502, 503, 504):
                 self._limiter.trigger_cooldown(30.0)
@@ -173,9 +206,12 @@ class AllDebridClient:
                     f"HTTP {http_err.code}: Rate limit or temporary server overload. Cooldown activated (30s).",
                 )
             try:
-                err_body = http_err.read().decode("utf-8")
+                err_body = _decode_response_bytes(
+                    http_err.read(),
+                    http_err.headers.get("Content-Encoding", "") if http_err.headers else "",
+                )
                 parsed_err = json.loads(err_body)
-                if "error" in parsed_err:
+                if isinstance(parsed_err, dict) and "error" in parsed_err:
                     err_obj = parsed_err["error"]
                     code = err_obj.get("code", str(http_err.code))
                     msg = err_obj.get("message", str(http_err))
@@ -190,10 +226,25 @@ class AllDebridClient:
         except Exception as exc:
             raise AllDebridError("NETWORK_ERROR", str(exc))
 
+        if not raw_body:
+            raise AllDebridError("EMPTY_RESPONSE", "Empty response received from AllDebrid.")
+
+        # Extract JSON object if wrapped by stray whitespace or proxy notices
+        if not raw_body.startswith("{") and "{" in raw_body and "}" in raw_body:
+            start_idx = raw_body.find("{")
+            end_idx = raw_body.rfind("}")
+            if 0 <= start_idx < end_idx:
+                raw_body = raw_body[start_idx : end_idx + 1]
+
         try:
             payload = json.loads(raw_body)
-        except Exception:
-            raise AllDebridError("JSON_INVALID", "Invalid JSON response from AllDebrid")
+        except Exception as json_exc:
+            snippet = raw_body[:240].replace("\n", " ")
+            _ad_logger.error("Invalid JSON on %s (%s): %s", endpoint, json_exc, snippet)
+            raise AllDebridError(
+                "JSON_INVALID",
+                f"Invalid JSON from AllDebrid: {snippet}",
+            )
 
         status = payload.get("status")
         if status == "error":
@@ -201,6 +252,7 @@ class AllDebridClient:
             code = err_obj.get("code", "GENERIC")
             msg = err_obj.get("message", "Unknown AllDebrid error")
             token = err_obj.get("token", "")
+            _ad_logger.warning("AllDebrid API Error on %s -> [%s] %s", endpoint, code, msg)
             if code in self.FATAL_AUTH_CODES:
                 self._limiter.trip_auth_circuit(f"{code}: {msg}")
             elif code == "MAINTENANCE":
@@ -298,16 +350,23 @@ class AllDebridClient:
             f"Content-Type: application/x-bittorrent\r\n\r\n"
         ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
 
-        url = f"{AppConfig.ALLDEBRID_BASE_URL}/v4/magnet/upload/file"
+        url = f"{AppConfig.ALLDEBRID_BASE_URL}/v4/magnet/upload/file?agent={urllib.parse.quote(AppConfig.ALLDEBRID_AGENT)}"
         headers = {
             "Accept": "application/json",
-            "User-Agent": f"DMAN/{AppConfig.APP_VERSION}",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         }
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=20.0) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+            raw_bytes = resp.read()
+            if raw_bytes.startswith(b"\x1f\x8b"):
+                raw_bytes = gzip.decompress(raw_bytes)
+            payload = json.loads(raw_bytes.decode("utf-8-sig", errors="replace"))
         if payload.get("status") != "success":
             err = payload.get("error", {})
             raise AllDebridError(err.get("code", "UPLOAD_ERROR"), err.get("message", "Torrent upload failed"))
@@ -325,10 +384,106 @@ class AllDebridClient:
         data = self._request(
             "POST",
             "/v4/magnet/files",
-            params={"id": magnet_ids},
+            params={"id": [int(x) for x in magnet_ids]},
             requires_auth=True,
         )
-        return data.get("magnets", [])
+        magnets = data.get("magnets", [])
+        if isinstance(magnets, dict):
+            return list(magnets.values())
+        return magnets if isinstance(magnets, list) else []
+
+    @staticmethod
+    def is_direct_cdn_link(url: str) -> bool:
+        """
+        JDownloader-style check: returns True ONLY if the URL is an already-generated
+        AllDebrid CDN stream/download link (e.g. *.debrid.it/dl/*, *.alldeb.ovh/dl/*).
+        Note: alldebrid.com/f/... and redirect.alldebrid.com/... are NOT direct CDN links
+        and MUST be unlocked via /v4/link/unlock.
+        """
+        try:
+            parsed = urllib.parse.urlparse(url.strip())
+            host = (parsed.hostname or "").lower()
+            path = parsed.path or ""
+            if host.endswith(".debrid.it") or host == "debrid.it" or host.endswith(".alldeb.ovh") or host == "alldeb.ovh":
+                return True
+            if ("alldebrid." in host or "debrid." in host) and path.startswith("/dl/"):
+                return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def extract_url_filename(url: str) -> str:
+        try:
+            path = urllib.parse.urlparse(url.strip()).path
+            name = urllib.parse.unquote(path.split("/")[-1]).strip()
+            return name
+        except Exception:
+            return ""
+
+    def get_link_infos(self, links: List[str], password: str = "") -> List[Dict[str, Any]]:
+        """Calls POST /v4/link/infos to batch-query filenames and sizes without generating download tokens."""
+        params: Dict[str, Any] = {"link": links}
+        if password:
+            params["password"] = password
+        data = self._request("POST", "/v4/link/infos", params=params, requires_auth=True)
+        infos = data.get("infos", [])
+        return infos if isinstance(infos, list) else []
+
+    def probe_links_metadata(self, links: List[str]) -> Dict[str, Any]:
+        """
+        Probes link names and total sizes safely using /v4/link/infos (or direct URL parsing
+        for already-unrestricted CDN links) without burning download quotas.
+        """
+        total_bytes = 0
+        items: List[Dict[str, Any]] = []
+        hoster_batch: List[str] = []
+
+        for link in links[:15]:
+            low = link.lower()
+            if low.startswith("magnet:?"):
+                items.append({"link": link, "filename": "Magnet Link", "size": 0, "type": "magnet"})
+            elif self.is_direct_cdn_link(link):
+                fn = self.extract_url_filename(link) or "Direct Debrid File"
+                items.append({
+                    "link": link,
+                    "directLink": link,
+                    "filename": fn,
+                    "size": 0,
+                    "host": "AllDebrid CDN",
+                    "type": "direct_cdn",
+                })
+            else:
+                hoster_batch.append(link)
+
+        if hoster_batch and self._api_key:
+            try:
+                infos = self.get_link_infos(hoster_batch)
+                for info in infos:
+                    if "error" in info:
+                        orig = info.get("link", "")
+                        fn = self.extract_url_filename(orig) or orig
+                        items.append({"link": orig, "filename": fn, "size": 0, "type": "direct"})
+                    else:
+                        sz = int(info.get("size", 0) or 0)
+                        fn = info.get("filename") or self.extract_url_filename(info.get("link", ""))
+                        total_bytes += sz
+                        items.append({
+                            "link": info.get("link", ""),
+                            "filename": fn,
+                            "size": sz,
+                            "host": info.get("host", "AllDebrid"),
+                            "type": "alldebrid",
+                        })
+                return {"totalBytes": total_bytes, "items": items}
+            except Exception as exc:
+                _ad_logger.debug("Probe /v4/link/infos fallback: %s", exc)
+
+        for link in hoster_batch:
+            fn = self.extract_url_filename(link) or link
+            items.append({"link": link, "filename": fn, "size": 0, "type": "direct"})
+
+        return {"totalBytes": total_bytes, "items": items}
 
     @staticmethod
     def flatten_magnet_files_tree(nodes: List[Dict[str, Any]], parent_path: str = "") -> List[Dict[str, Any]]:
@@ -445,7 +600,14 @@ class AllDebridResolverWorker(QThread):
         return None
 
     def _unlock_and_emit(self, url: str, target_dir: str) -> None:
+        if AllDebridClient.is_direct_cdn_link(url):
+            fn = AllDebridClient.extract_url_filename(url)
+            _ad_logger.info("Direct CDN link detected -> bypassing unlock: %s (file='%s')", url, fn)
+            self.directLinkReady.emit(url, target_dir, fn)
+            return
+
         try:
+            _ad_logger.info("Unlocking link via AllDebrid /v4/link/unlock: %s", url)
             unlocked = self.client.unlock_link(url)
             delayed_id = unlocked.get("delayed")
             filename = unlocked.get("filename", "")
