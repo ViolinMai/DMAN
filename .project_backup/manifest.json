@@ -1,6 +1,6 @@
 {
   "modified": [
-    "backend/alldebrid_api.py"
+    "models/download_model.py"
   ],
   "created": []
 }

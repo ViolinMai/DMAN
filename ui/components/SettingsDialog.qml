@@ -1,17 +1,20 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import ".."
 
-Popup {
+Window {
     id: root
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    anchors.centerIn: Overlay.overlay
-    width: Math.min(680, parent ? parent.width - 40 : 680)
-    height: 540
-    padding: 0
+    title: "DMAN - Settings & Configuration"
+    width: 820
+    height: 580
+    minimumWidth: 720
+    minimumHeight: 500
+    flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+    modality: Qt.NonModal
+    visible: false
+    color: Theme.bgPrimary
 
     required property var controller
 
@@ -42,17 +45,26 @@ Popup {
         clipAutoPopupCheck.checked = root.controller.clipboardAutoPopup
 
         notifCompleteCheck.checked = root.controller.notifyOnComplete
+        notifPackageOnlyCheck.checked = root.controller.notifyPackageOnly
         notifErrorCheck.checked = root.controller.notifyOnError
         notifClipCheck.checked = root.controller.notifyOnClipboard
         notifTitleField.text = root.controller.notifyTitleTemplate
         notifCompleteField.text = root.controller.notifyCompleteTemplate
+        notifPackageField.text = root.controller.notifyPackageTemplate
         notifErrorField.text = root.controller.notifyErrorTemplate
         notifClipField.text = root.controller.notifyClipboardTemplate
 
         root.pinCodeDisplay = ""
         root.pinUrlDisplay = ""
         root.controller.refreshDebugLogs()
-        root.open()
+        root.show()
+        root.raise()
+        root.requestActivate()
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        onActivated: root.close()
     }
 
     Connections {
@@ -69,276 +81,620 @@ Popup {
         }
     }
 
-    background: Rectangle {
-        color: Theme.bgPanel
+    component SectionCard: Rectangle {
+        default property alias cardContent: innerCol.data
+        property string cardTitle: ""
+        property color titleColor: Theme.accentBlue
+        Layout.fillWidth: true
+        implicitHeight: innerCol.implicitHeight + 28
+        color: Theme.bgSecondary
         radius: Theme.radiusMedium
-        border.color: Theme.borderFocus
+        border.color: Theme.borderSubtle
         border.width: 1
-    }
 
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: 16
-        spacing: 10
-
-        // Dialog Header + Tab Selector
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
+        ColumnLayout {
+            id: innerCol
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 10
 
             Text {
-                text: "DMAN Preferences"
-                color: Theme.textPrimary
-                font.pixelSize: 15
+                visible: cardTitle !== ""
+                text: cardTitle
+                color: titleColor
+                font.pixelSize: 13
                 font.bold: true
             }
+        }
+    }
 
-            Item { Layout.fillWidth: true }
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
 
-            Repeater {
-                model: [
-                    "1. Engine & AllDebrid",
-                    "2. System & Watchdog",
-                    "3. Notifications",
-                    "4. Logs & Debugging"
-                ]
+        // LEFT NAVIGATION SIDEBAR
+        Rectangle {
+            Layout.preferredWidth: 210
+            Layout.fillHeight: true
+            color: Theme.bgSecondary
+            border.color: Theme.borderSubtle
+            border.width: 1
 
-                delegate: Rectangle {
-                    implicitWidth: tabLbl.implicitWidth + 18
-                    implicitHeight: 28
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 6
+
+                Text {
+                    text: "⚙ Preferences"
+                    color: Theme.textPrimary
+                    font.pixelSize: 16
+                    font.bold: true
+                    Layout.bottomMargin: 10
+                }
+
+                Repeater {
+                    model: [
+                        { title: "Engine & Storage", icon: "🚀" },
+                        { title: "AllDebrid Cloud", icon: "⚡" },
+                        { title: "System & Watchdog", icon: "🖥" },
+                        { title: "Notifications", icon: "🔔" },
+                        { title: "Logs & Debugging", icon: "🐞" }
+                    ]
+
+                    delegate: Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 36
+                        radius: Theme.radiusSmall
+                        readonly property bool isCurrent: root.currentTab === index
+                        color: isCurrent ? Theme.rowSelected : (navMouse.containsMouse ? Theme.rowHover : "transparent")
+                        border.color: isCurrent ? Theme.borderFocus : "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 10
+                            spacing: 10
+
+                            Text {
+                                text: modelData.icon
+                                font.pixelSize: 14
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.title
+                                color: isCurrent ? "#FFFFFF" : Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: isCurrent
+                            }
+                        }
+
+                        MouseArea {
+                            id: navMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.currentTab = index
+                        }
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
+
+                // App Lifecycle Controls at bottom of sidebar
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 30
                     radius: Theme.radiusSmall
-                    color: root.currentTab === index ? Theme.rowSelected : Theme.bgHeader
-                    border.color: root.currentTab === index ? Theme.borderFocus : Theme.borderSubtle
+                    color: Theme.bgHeader
+                    border.color: Theme.statusPaused
 
                     Text {
-                        id: tabLbl
                         anchors.centerIn: parent
-                        text: modelData
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: root.currentTab === index
+                        text: "↻ Restart DMAN"
+                        color: Theme.statusPaused
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
                     }
 
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.currentTab = index
+                        onClicked: root.controller.restartApp()
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 30
+                    radius: Theme.radiusSmall
+                    color: Theme.bgHeader
+                    border.color: Theme.statusError
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "⏻ Quit & Shutdown"
+                        color: Theme.statusError
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.controller.shutdownApp()
                     }
                 }
             }
         }
 
-        // TAB 0: Engine & AllDebrid
+        // RIGHT CONTENT AREA
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            visible: root.currentTab === 0
-            spacing: 10
+            spacing: 0
 
-            Rectangle {
+            // Content Pages Container
+            Item {
                 Layout.fillWidth: true
-                implicitHeight: dirCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
+                Layout.fillHeight: true
+                Layout.margins: 18
 
+                // PAGE 0: Engine & Storage
                 ColumnLayout {
-                    id: dirCol
                     anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 6
+                    visible: root.currentTab === 0
+                    spacing: 14
 
-                    Text {
-                        text: "Default Download Directory"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
+                    SectionCard {
+                        cardTitle: "Default Download Storage"
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        TextField {
-                            id: defaultDirField
+                        RowLayout {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            selectByMouse: true
-                            leftPadding: 8
-                            rightPadding: 8
-                            background: Rectangle {
-                                color: Theme.bgInput
-                                radius: Theme.radiusSmall
-                                border.color: Theme.borderSubtle
-                            }
-                        }
+                            spacing: 8
 
-                        Rectangle {
-                            implicitWidth: 85
-                            implicitHeight: 28
-                            radius: Theme.radiusSmall
-                            color: Theme.bgHeader
-                            border.color: Theme.borderSubtle
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "Browse..."
+                            TextField {
+                                id: defaultDirField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 32
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
+                                selectByMouse: true
+                                leftPadding: 10
+                                background: Rectangle {
+                                    color: Theme.bgInput
+                                    radius: Theme.radiusSmall
+                                    border.color: defaultDirField.activeFocus ? Theme.borderFocus : Theme.borderSubtle
+                                }
                             }
 
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    var folder = root.controller.browseFolder(defaultDirField.text)
-                                    if (folder !== "") defaultDirField.text = folder
+                            Rectangle {
+                                implicitWidth: 95
+                                implicitHeight: 32
+                                radius: Theme.radiusSmall
+                                color: Theme.bgHeader
+                                border.color: Theme.borderSubtle
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "Browse..."
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var folder = root.controller.browseFolder(defaultDirField.text)
+                                        if (folder !== "") defaultDirField.text = folder
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
 
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: ariaCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
+                    SectionCard {
+                        cardTitle: "aria2 High-Speed Engine Tuning (Applied Live)"
 
-                ColumnLayout {
-                    id: ariaCol
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: 2
+                            rowSpacing: 12
+                            columnSpacing: 20
 
-                    Text {
-                        text: "aria2 Engine Tuning (Live Applied & Resumable Sessions)"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
+                            Text { text: "Max Concurrent Downloads:"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: concurrentSpin; from: 1; to: 32; value: 5; editable: true }
 
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 4
-                        rowSpacing: 8
-                        columnSpacing: 12
+                            Text { text: "Connections / Split per File (1 - 64):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: splitSpin; from: 1; to: 64; value: 16; editable: true }
 
-                        Text { text: "Max Concurrent Files:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: concurrentSpin; from: 1; to: 32; value: 5; editable: true }
+                            Text { text: "Max Connections per Server (1 - 16):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: connPerServerSpin; from: 1; to: 16; value: 16; editable: true }
 
-                        Text { text: "Segments per File (Split):"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: splitSpin; from: 1; to: 64; value: 16; editable: true }
+                            Text { text: "Minimum Split Size (e.g. 1M, 5M):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: minSplitField
+                                Layout.preferredWidth: 120
+                                Layout.preferredHeight: 28
+                                text: "1M"
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
 
-                        Text { text: "Max Conn. per Server:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: connPerServerSpin; from: 1; to: 16; value: 16; editable: true }
-
-                        Text { text: "Min Split Size (1M, 5M):"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: minSplitField
-                            Layout.preferredWidth: 100
-                            Layout.preferredHeight: 26
-                            text: "1M"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            Text { text: "Global Speed Limit (MB/s, 0 = Unlimited):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: speedLimitSpin; from: 0; to: 2000; value: 0; editable: true }
                         }
-
-                        Text { text: "Speed Limit (MB/s, 0=Unlim):"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: speedLimitSpin; from: 0; to: 2000; value: 0; editable: true }
                     }
+
+                    Item { Layout.fillHeight: true }
                 }
-            }
 
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
+                // PAGE 1: AllDebrid Cloud
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
+                    visible: root.currentTab === 1
+                    spacing: 14
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text {
-                            text: "AllDebrid API v4 / v4.1 (Supports Links, Magnets & .torrent Files)"
-                            color: Theme.statusActive
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                        }
-                        Item { Layout.fillWidth: true }
-                        Text {
-                            text: "Status: " + root.controller.alldebridStatusText
-                            color: root.controller.alldebridIsPremium ? Theme.statusActive : Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.bold: true
-                        }
-                    }
+                    SectionCard {
+                        cardTitle: "AllDebrid Account & Unrestricting"
+                        titleColor: Theme.statusActive
 
-                    RowLayout {
-                        spacing: 16
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Account Status: " + root.controller.alldebridStatusText
+                                color: root.controller.alldebridIsPremium ? Theme.statusActive : Theme.textSecondary
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
                         CheckBox {
                             id: adEnabledCheck
-                            text: "Enable AllDebrid Unrestricting"
+                            text: "Enable AllDebrid Link Unrestricting & Fast-Track CDN"
                             contentItem: Text {
                                 text: adEnabledCheck.text
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: adEnabledCheck.indicator.width + 6
+                                leftPadding: adEnabledCheck.indicator.width + 8
                                 verticalAlignment: Text.AlignVCenter
                             }
                         }
+
                         CheckBox {
                             id: adCloudMagnetCheck
-                            text: "Convert Magnets & .torrent via Cloud"
+                            text: "Convert Magnets & .torrent files via AllDebrid Cloud"
                             contentItem: Text {
                                 text: adCloudMagnetCheck.text
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: adCloudMagnetCheck.indicator.width + 6
+                                leftPadding: adCloudMagnetCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text { text: "Bearer API Key:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+
+                            TextField {
+                                id: adApiKeyField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 32
+                                placeholderText: "Paste API Key or use 'Login via PIN'"
+                                placeholderTextColor: Theme.textMuted
+                                echoMode: TextInput.Password
+                                color: Theme.textPrimary
+                                leftPadding: 10
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Rectangle {
+                                implicitWidth: 125
+                                implicitHeight: 32
+                                radius: Theme.radiusSmall
+                                color: Theme.bgHeader
+                                border.color: Theme.borderFocus
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "🔑 Login via PIN"
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: true
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.controller.startAllDebridPinAuth()
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: root.pinCodeDisplay !== ""
+                            text: "PIN Code: [" + root.pinCodeDisplay + "] — Opened in browser: " + root.pinUrlDisplay
+                            color: Theme.statusPaused
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.bold: true
+                        }
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+
+                // PAGE 2: System & Watchdog
+                ColumnLayout {
+                    anchors.fill: parent
+                    visible: root.currentTab === 2
+                    spacing: 14
+
+                    SectionCard {
+                        cardTitle: "Desktop Integration & Power Management"
+
+                        CheckBox {
+                            id: startSysCheck
+                            text: "Start DMAN automatically on system login"
+                            contentItem: Text {
+                                text: startSysCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: startSysCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        CheckBox {
+                            id: startMinCheck
+                            text: "Start minimized in System Tray"
+                            contentItem: Text {
+                                text: startMinCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: startMinCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        CheckBox {
+                            id: closeTrayCheck
+                            text: "Closing main window hides DMAN to System Tray (keeps downloads active)"
+                            contentItem: Text {
+                                text: closeTrayCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: closeTrayCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        RowLayout {
+                            spacing: 8
+                            Text { text: "When all downloads finish:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+
+                            Repeater {
+                                model: [
+                                    { label: "Do Nothing", value: "nothing" },
+                                    { label: "Sleep OS", value: "sleep" },
+                                    { label: "Shutdown OS", value: "shutdown" },
+                                    { label: "Quit App", value: "quit" }
+                                ]
+                                delegate: Rectangle {
+                                    implicitWidth: pwrTxt.implicitWidth + 16
+                                    implicitHeight: 28
+                                    radius: Theme.radiusSmall
+                                    color: root.selectedPostAction === modelData.value ? Theme.rowSelected : Theme.bgHeader
+                                    border.color: root.selectedPostAction === modelData.value ? Theme.borderFocus : Theme.borderSubtle
+
+                                    Text {
+                                        id: pwrTxt
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.selectedPostAction = modelData.value
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        cardTitle: "Clipboard Watchdog"
+                        titleColor: Theme.statusActive
+
+                        RowLayout {
+                            spacing: 8
+                            Text { text: "Capture Mode:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+
+                            Repeater {
+                                model: [
+                                    { label: "Disabled", value: "disabled" },
+                                    { label: "All Download Links", value: "all" },
+                                    { label: "AllDebrid Domains Only", value: "alldebrid_only" }
+                                ]
+                                delegate: Rectangle {
+                                    implicitWidth: cmTxt.implicitWidth + 16
+                                    implicitHeight: 28
+                                    radius: Theme.radiusSmall
+                                    color: root.selectedClipboardMode === modelData.value ? Theme.rowSelected : Theme.bgHeader
+                                    border.color: root.selectedClipboardMode === modelData.value ? Theme.borderFocus : Theme.borderSubtle
+
+                                    Text {
+                                        id: cmTxt
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.selectedClipboardMode = modelData.value
+                                    }
+                                }
+                            }
+                        }
+
+                        CheckBox {
+                            id: clipAutoPopupCheck
+                            text: "Pop up 'Add Links' window automatically when links are copied"
+                            contentItem: Text {
+                                text: clipAutoPopupCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: clipAutoPopupCheck.indicator.width + 8
                                 verticalAlignment: Text.AlignVCenter
                             }
                         }
                     }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
+                    Item { Layout.fillHeight: true }
+                }
 
-                        Text { text: "API Key:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                // PAGE 3: Notifications
+                ColumnLayout {
+                    anchors.fill: parent
+                    visible: root.currentTab === 3
+                    spacing: 14
 
-                        TextField {
-                            id: adApiKeyField
+                    SectionCard {
+                        cardTitle: "Notification Triggers & Package Grouping"
+
+                        RowLayout {
+                            spacing: 18
+                            CheckBox {
+                                id: notifCompleteCheck
+                                text: "Notify on Completion"
+                                contentItem: Text {
+                                    text: notifCompleteCheck.text
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    leftPadding: notifCompleteCheck.indicator.width + 6
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                            CheckBox {
+                                id: notifErrorCheck
+                                text: "Notify on Error"
+                                contentItem: Text {
+                                    text: notifErrorCheck.text
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    leftPadding: notifErrorCheck.indicator.width + 6
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                            CheckBox {
+                                id: notifClipCheck
+                                text: "Notify on Clipboard Capture"
+                                contentItem: Text {
+                                    text: notifClipCheck.text
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    leftPadding: notifClipCheck.indicator.width + 6
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                        }
+
+                        CheckBox {
+                            id: notifPackageOnlyCheck
+                            text: "Notify ONCE per parent Package/Folder when ALL files inside it finish (Prevents spam)"
+                            contentItem: Text {
+                                text: notifPackageOnlyCheck.text
+                                color: Theme.statusFinished
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: true
+                                leftPadding: notifPackageOnlyCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        cardTitle: "Custom Notification Templates ({event}, {name}, {dir}, {count}, {error})"
+
+                        GridLayout {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            placeholderText: "Bearer API Key or click 'Login via PIN'"
-                            placeholderTextColor: Theme.textMuted
-                            echoMode: TextInput.Password
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            columns: 2
+                            rowSpacing: 8
+                            columnSpacing: 12
+
+                            Text { text: "Title Template:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifTitleField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Package Finished:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifPackageField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Single File Finished:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifCompleteField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Error Template:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifErrorField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Clipboard Template:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifClipField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
                         }
 
                         Rectangle {
-                            implicitWidth: 115
-                            implicitHeight: 28
+                            implicitWidth: 165
+                            implicitHeight: 30
                             radius: Theme.radiusSmall
                             color: Theme.bgHeader
                             border.color: Theme.borderFocus
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "Login via PIN"
+                                text: "🔔 Send Test Notification"
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.bold: true
@@ -347,597 +703,209 @@ Popup {
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.controller.startAllDebridPinAuth()
+                                onClicked: root.controller.testCustomNotification()
                             }
-                        }
-                    }
-
-                    Text {
-                        visible: root.pinCodeDisplay !== ""
-                        text: "PIN: [" + root.pinCodeDisplay + "] — Approve in browser (" + root.pinUrlDisplay + ")"
-                        color: Theme.statusPaused
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                    }
-                }
-            }
-        }
-
-        // TAB 1: System Integration, Tray, Power & Clipboard Watchdog
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: root.currentTab === 1
-            spacing: 10
-
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: sysCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                ColumnLayout {
-                    id: sysCol
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
-
-                    Text {
-                        text: "Desktop & System Tray Integration (Hyprland Wayland & Windows)"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-
-                    CheckBox {
-                        id: startSysCheck
-                        text: "Start DMAN automatically with system login"
-                        contentItem: Text {
-                            text: startSysCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: startSysCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    CheckBox {
-                        id: startMinCheck
-                        text: "Start minimized in System Tray"
-                        contentItem: Text {
-                            text: startMinCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: startMinCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    CheckBox {
-                        id: closeTrayCheck
-                        text: "Closing the window places DMAN in System Tray (Keep downloads running)"
-                        contentItem: Text {
-                            text: closeTrayCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: closeTrayCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    RowLayout {
-                        spacing: 10
-                        Text {
-                            text: "When all downloads finish:"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
-                        Repeater {
-                            model: [
-                                { label: "Do Nothing", value: "nothing" },
-                                { label: "Sleep System", value: "sleep" },
-                                { label: "Shutdown System", value: "shutdown" },
-                                { label: "Quit DMAN", value: "quit" }
-                            ]
-
-                            delegate: Rectangle {
-                                implicitWidth: pwrTxt.implicitWidth + 14
-                                implicitHeight: 24
-                                radius: Theme.radiusSmall
-                                color: root.selectedPostAction === modelData.value ? Theme.rowSelected : Theme.bgHeader
-                                border.color: root.selectedPostAction === modelData.value ? Theme.borderFocus : Theme.borderSubtle
-
-                                Text {
-                                    id: pwrTxt
-                                    anchors.centerIn: parent
-                                    text: modelData.label
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.selectedPostAction = modelData.value
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: clipCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                ColumnLayout {
-                    id: clipCol
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
-
-                    Text {
-                        text: "Clipboard Watchdog (Auto-Capture Copied Links)"
-                        color: Theme.statusActive
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-
-                    RowLayout {
-                        spacing: 8
-                        Text {
-                            text: "Watchdog Mode:"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
-                        Repeater {
-                            model: [
-                                { label: "Disabled", value: "disabled" },
-                                { label: "All Download Links", value: "all" },
-                                { label: "AllDebrid Supported Only", value: "alldebrid_only" }
-                            ]
-
-                            delegate: Rectangle {
-                                implicitWidth: cmTxt.implicitWidth + 14
-                                implicitHeight: 24
-                                radius: Theme.radiusSmall
-                                color: root.selectedClipboardMode === modelData.value ? Theme.rowSelected : Theme.bgHeader
-                                border.color: root.selectedClipboardMode === modelData.value ? Theme.borderFocus : Theme.borderSubtle
-
-                                Text {
-                                    id: cmTxt
-                                    anchors.centerIn: parent
-                                    text: modelData.label
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.selectedClipboardMode = modelData.value
-                                }
-                            }
-                        }
-                    }
-
-                    CheckBox {
-                        id: clipAutoPopupCheck
-                        text: "Automatically open 'Add Links' dialog when links are captured"
-                        contentItem: Text {
-                            text: clipAutoPopupCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: clipAutoPopupCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-                }
-            }
-
-            // App Lifecycle Control Box
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 12
-                    spacing: 12
-
-                    Text {
-                        text: "Application Control (Saves aria2 session before exit):"
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeNormal
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Rectangle {
-                        implicitWidth: 120
-                        implicitHeight: 28
-                        radius: Theme.radiusSmall
-                        color: Theme.bgHeader
-                        border.color: Theme.statusPaused
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "↻ Restart App"
-                            color: Theme.statusPaused
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.controller.restartApp()
-                        }
-                    }
-
-                    Rectangle {
-                        implicitWidth: 130
-                        implicitHeight: 28
-                        radius: Theme.radiusSmall
-                        color: Theme.bgHeader
-                        border.color: Theme.statusError
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "⏻ Shutdown App"
-                            color: Theme.statusError
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.controller.shutdownApp()
-                        }
-                    }
-                }
-            }
-        }
-
-        // TAB 2: Notifications Customization
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: root.currentTab === 2
-            spacing: 10
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 10
-
-                    Text {
-                        text: "OS Notification Triggers & Custom Message Templates"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-
-                    RowLayout {
-                        spacing: 16
-                        CheckBox {
-                            id: notifCompleteCheck
-                            text: "On Download Complete"
-                            contentItem: Text {
-                                text: notifCompleteCheck.text
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: notifCompleteCheck.indicator.width + 6
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                        CheckBox {
-                            id: notifErrorCheck
-                            text: "On Download Error"
-                            contentItem: Text {
-                                text: notifErrorCheck.text
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: notifErrorCheck.indicator.width + 6
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                        CheckBox {
-                            id: notifClipCheck
-                            text: "On Clipboard Link Captured"
-                            contentItem: Text {
-                                text: notifClipCheck.text
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: notifClipCheck.indicator.width + 6
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "Available Variables: {event}, {name}, {dir}, {count}, {error}"
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 2
-                        rowSpacing: 8
-                        columnSpacing: 10
-
-                        Text { text: "Notification Title:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifTitleField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-
-                        Text { text: "Complete Body:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifCompleteField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-
-                        Text { text: "Error Body:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifErrorField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-
-                        Text { text: "Clipboard Body:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifClipField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-                    }
-
-                    Rectangle {
-                        implicitWidth: 160
-                        implicitHeight: 28
-                        radius: Theme.radiusSmall
-                        color: Theme.bgHeader
-                        border.color: Theme.borderFocus
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "Send Test Notification"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.controller.testCustomNotification()
                         }
                     }
 
                     Item { Layout.fillHeight: true }
                 }
+
+                // PAGE 4: Logs & Debugging
+                ColumnLayout {
+                    anchors.fill: parent
+                    visible: root.currentTab === 4
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            text: "Live Application & API Debug Logs"
+                            color: Theme.accentBlue
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Rectangle {
+                            implicitWidth: 90
+                            implicitHeight: 28
+                            radius: Theme.radiusSmall
+                            color: Theme.bgHeader
+                            border.color: Theme.borderSubtle
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "↻ Refresh"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.controller.refreshDebugLogs()
+                            }
+                        }
+
+                        Rectangle {
+                            implicitWidth: 80
+                            implicitHeight: 28
+                            radius: Theme.radiusSmall
+                            color: Theme.bgHeader
+                            border.color: Theme.borderSubtle
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Clear"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.controller.clearDebugLogs()
+                            }
+                        }
+
+                        Rectangle {
+                            implicitWidth: 125
+                            implicitHeight: 28
+                            radius: Theme.radiusSmall
+                            color: Theme.bgHeader
+                            border.color: Theme.borderFocus
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "📋 Copy All Logs"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.bold: true
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.controller.copyLogsToClipboard(debugLogArea.text)
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        color: Theme.bgInput
+                        radius: Theme.radiusSmall
+                        border.color: Theme.borderSubtle
+
+                        ScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 8
+
+                            TextArea {
+                                id: debugLogArea
+                                readOnly: true
+                                selectByMouse: true
+                                text: root.controller.debugLogsText
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: 11
+                                wrapMode: TextEdit.WrapAnywhere
+                                background: null
+                            }
+                        }
+                    }
+                }
             }
-        }
 
-        // TAB 3: Logs & Debugging
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: root.currentTab === 3
-            spacing: 8
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                Text {
-                    text: "Live Application & API Debug Logs"
-                    color: Theme.accentBlue
-                    font.pixelSize: Theme.fontSizeNormal
-                    font.bold: true
-                }
-
-                Item { Layout.fillWidth: true }
-
-                Rectangle {
-                    implicitWidth: 90
-                    implicitHeight: 26
-                    radius: Theme.radiusSmall
-                    color: Theme.bgHeader
-                    border.color: Theme.borderSubtle
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "↻ Refresh"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.controller.refreshDebugLogs()
-                    }
-                }
-
-                Rectangle {
-                    implicitWidth: 80
-                    implicitHeight: 26
-                    radius: Theme.radiusSmall
-                    color: Theme.bgHeader
-                    border.color: Theme.borderSubtle
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "Clear"
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.controller.clearDebugLogs()
-                    }
-                }
-
-                Rectangle {
-                    implicitWidth: 120
-                    implicitHeight: 26
-                    radius: Theme.radiusSmall
-                    color: Theme.bgHeader
-                    border.color: Theme.borderFocus
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "Copy All Logs"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.controller.copyLogsToClipboard(debugLogArea.text)
-                    }
-                }
-            }
-
+            // Bottom Save & Cancel Footer Bar
             Rectangle {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgInput
-                radius: Theme.radiusSmall
+                Layout.preferredHeight: 52
+                color: Theme.bgSecondary
                 border.color: Theme.borderSubtle
+                border.width: 1
 
-                ScrollView {
+                RowLayout {
                     anchors.fill: parent
-                    anchors.margins: 6
+                    anchors.leftMargin: 18
+                    anchors.rightMargin: 18
+                    spacing: 10
 
-                    TextArea {
-                        id: debugLogArea
-                        readOnly: true
-                        selectByMouse: true
-                        text: root.controller.debugLogsText
-                        color: Theme.textPrimary
-                        font.family: "monospace"
-                        font.pixelSize: 11
-                        wrapMode: TextEdit.WrapAnywhere
-                        background: null
+                    Item { Layout.fillWidth: true }
+
+                    Rectangle {
+                        implicitWidth: 95
+                        implicitHeight: 32
+                        radius: Theme.radiusSmall
+                        color: Theme.bgHeader
+                        border.color: Theme.borderSubtle
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Cancel"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.close()
+                        }
                     }
-                }
-            }
-        }
 
-        // Bottom Save & Cancel Row
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 10
+                    Rectangle {
+                        implicitWidth: 145
+                        implicitHeight: 32
+                        radius: Theme.radiusSmall
+                        color: Theme.accentBlue
 
-            Item { Layout.fillWidth: true }
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Save & Apply"
+                            color: "#FFFFFF"
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.bold: true
+                        }
 
-            Rectangle {
-                implicitWidth: 90
-                implicitHeight: 30
-                radius: Theme.radiusSmall
-                color: Theme.bgHeader
-                border.color: Theme.borderSubtle
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "Cancel"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSizeNormal
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.close()
-                }
-            }
-
-            Rectangle {
-                implicitWidth: 135
-                implicitHeight: 30
-                radius: Theme.radiusSmall
-                color: Theme.accentBlue
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "Save & Apply"
-                    color: "#FFFFFF"
-                    font.pixelSize: Theme.fontSizeNormal
-                    font.bold: true
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.controller.saveSettings({
-                            "defaultSaveDir": defaultDirField.text,
-                            "maxConcurrentDownloads": concurrentSpin.value,
-                            "splitCount": splitSpin.value,
-                            "maxConnectionPerServer": connPerServerSpin.value,
-                            "minSplitSize": minSplitField.text,
-                            "speedLimitMb": speedLimitSpin.value,
-                            "alldebridEnabled": adEnabledCheck.checked,
-                            "alldebridApiKey": adApiKeyField.text,
-                            "alldebridCloudMagnets": adCloudMagnetCheck.checked,
-                            "startWithSystem": startSysCheck.checked,
-                            "startMinimized": startMinCheck.checked,
-                            "closeToTray": closeTrayCheck.checked,
-                            "postDownloadAction": root.selectedPostAction,
-                            "clipboardMode": root.selectedClipboardMode,
-                            "clipboardAutoPopup": clipAutoPopupCheck.checked,
-                            "notifyOnComplete": notifCompleteCheck.checked,
-                            "notifyOnError": notifErrorCheck.checked,
-                            "notifyOnClipboard": notifClipCheck.checked,
-                            "notifyTitleTemplate": notifTitleField.text,
-                            "notifyCompleteTemplate": notifCompleteField.text,
-                            "notifyErrorTemplate": notifErrorField.text,
-                            "notifyClipboardTemplate": notifClipField.text
-                        })
-                        root.close()
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.controller.saveSettings({
+                                    "defaultSaveDir": defaultDirField.text,
+                                    "maxConcurrentDownloads": concurrentSpin.value,
+                                    "splitCount": splitSpin.value,
+                                    "maxConnectionPerServer": connPerServerSpin.value,
+                                    "minSplitSize": minSplitField.text,
+                                    "speedLimitMb": speedLimitSpin.value,
+                                    "alldebridEnabled": adEnabledCheck.checked,
+                                    "alldebridApiKey": adApiKeyField.text,
+                                    "alldebridCloudMagnets": adCloudMagnetCheck.checked,
+                                    "startWithSystem": startSysCheck.checked,
+                                    "startMinimized": startMinCheck.checked,
+                                    "closeToTray": closeTrayCheck.checked,
+                                    "postDownloadAction": root.selectedPostAction,
+                                    "clipboardMode": root.selectedClipboardMode,
+                                    "clipboardAutoPopup": clipAutoPopupCheck.checked,
+                                    "notifyOnComplete": notifCompleteCheck.checked,
+                                    "notifyPackageOnly": notifPackageOnlyCheck.checked,
+                                    "notifyOnError": notifErrorCheck.checked,
+                                    "notifyOnClipboard": notifClipCheck.checked,
+                                    "notifyTitleTemplate": notifTitleField.text,
+                                    "notifyCompleteTemplate": notifCompleteField.text,
+                                    "notifyPackageTemplate": notifPackageField.text,
+                                    "notifyErrorTemplate": notifErrorField.text,
+                                    "notifyClipboardTemplate": notifClipField.text
+                                })
+                                root.close()
+                            }
+                        }
                     }
                 }
             }

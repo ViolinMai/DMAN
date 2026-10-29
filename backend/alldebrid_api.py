@@ -392,6 +392,34 @@ class AllDebridClient:
             return list(magnets.values())
         return magnets if isinstance(magnets, list) else []
 
+    def is_host_supported(self, url: str) -> bool:
+        """
+        Returns True ONLY if the URL is a Magnet, local .torrent, an AllDebrid link/CDN,
+        or belongs to a domain explicitly listed in AllDebrid's supported hosts.
+        """
+        low = url.strip().lower()
+        if not low:
+            return False
+        if low.startswith("magnet:?") or low.endswith(".torrent"):
+            return True
+        if self.is_direct_cdn_link(url):
+            return True
+        try:
+            parsed = urllib.parse.urlparse(low)
+            host = (parsed.hostname or "").lower()
+            if not host:
+                return False
+            if "alldebrid." in host or host.endswith(".debrid.it") or host.endswith(".alldeb.ovh"):
+                return True
+            domains = self.get_supported_domains()
+            for dom in domains:
+                d = dom.lower().strip()
+                if d and (host == d or host.endswith("." + d)):
+                    return True
+        except Exception:
+            pass
+        return False
+
     @staticmethod
     def is_direct_cdn_link(url: str) -> bool:
         """
@@ -430,31 +458,55 @@ class AllDebridClient:
         infos = data.get("infos", [])
         return infos if isinstance(infos, list) else []
 
+    @staticmethod
+    def probe_direct_head_size(url: str) -> int:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                method="HEAD",
+            )
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
+                cl = resp.headers.get("Content-Length")
+                return int(cl) if cl and cl.isdigit() else 0
+        except Exception:
+            return 0
+
     def probe_links_metadata(self, links: List[str]) -> Dict[str, Any]:
         """
-        Probes link names and total sizes safely using /v4/link/infos (or direct URL parsing
-        for already-unrestricted CDN links) without burning download quotas.
+        Probes link names and total sizes safely using /v4/link/infos ONLY for supported
+        AllDebrid hosters, and HTTP HEAD for regular direct links or CDN links.
         """
         total_bytes = 0
         items: List[Dict[str, Any]] = []
         hoster_batch: List[str] = []
 
-        for link in links[:15]:
+        for link in links[:40]:
             low = link.lower()
             if low.startswith("magnet:?"):
                 items.append({"link": link, "filename": "Magnet Link", "size": 0, "type": "magnet"})
+            elif low.endswith(".torrent") and not low.startswith(("http://", "https://", "ftp://")):
+                fn = link.replace("\\", "/").split("/")[-1]
+                items.append({"link": link, "filename": fn, "size": 0, "type": "torrent"})
             elif self.is_direct_cdn_link(link):
                 fn = self.extract_url_filename(link) or "Direct Debrid File"
+                sz = self.probe_direct_head_size(link)
+                total_bytes += sz
                 items.append({
                     "link": link,
                     "directLink": link,
                     "filename": fn,
-                    "size": 0,
+                    "size": sz,
                     "host": "AllDebrid CDN",
                     "type": "direct_cdn",
                 })
-            else:
+            elif self._api_key and self.is_host_supported(link):
                 hoster_batch.append(link)
+            else:
+                fn = self.extract_url_filename(link) or link
+                sz = self.probe_direct_head_size(link)
+                total_bytes += sz
+                items.append({"link": link, "filename": fn, "size": sz, "type": "direct"})
 
         if hoster_batch and self._api_key:
             try:
@@ -463,7 +515,9 @@ class AllDebridClient:
                     if "error" in info:
                         orig = info.get("link", "")
                         fn = self.extract_url_filename(orig) or orig
-                        items.append({"link": orig, "filename": fn, "size": 0, "type": "direct"})
+                        sz = self.probe_direct_head_size(orig)
+                        total_bytes += sz
+                        items.append({"link": orig, "filename": fn, "size": sz, "type": "direct"})
                     else:
                         sz = int(info.get("size", 0) or 0)
                         fn = info.get("filename") or self.extract_url_filename(info.get("link", ""))
@@ -481,7 +535,9 @@ class AllDebridClient:
 
         for link in hoster_batch:
             fn = self.extract_url_filename(link) or link
-            items.append({"link": link, "filename": fn, "size": 0, "type": "direct"})
+            sz = self.probe_direct_head_size(link)
+            total_bytes += sz
+            items.append({"link": link, "filename": fn, "size": sz, "type": "direct"})
 
         return {"totalBytes": total_bytes, "items": items}
 
@@ -604,6 +660,11 @@ class AllDebridResolverWorker(QThread):
             fn = AllDebridClient.extract_url_filename(url)
             _ad_logger.info("Direct CDN link detected -> bypassing unlock: %s (file='%s')", url, fn)
             self.directLinkReady.emit(url, target_dir, fn)
+            return
+
+        if not self.client.is_host_supported(url):
+            _ad_logger.info("Direct non-AllDebrid URL detected -> handing straight to aria2c: %s", url)
+            self.fallbackToAria2.emit(url, target_dir)
             return
 
         try:

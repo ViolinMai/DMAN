@@ -31,7 +31,7 @@ QtObject {
     readonly property color statusActive: "#6CC644"
     readonly property color statusPaused: "#E5C07B"
     readonly property color statusError: "#E06C75"
-    readonly property color statusFinished: "#73C991"
+    readonly property color statusFinished: "#C678DD"
 
     // Sizing & Spacing
     readonly property int fontSizeSmall: 11

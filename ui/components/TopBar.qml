@@ -150,6 +150,50 @@ Rectangle {
             onTriggered: root.openSettingsRequested()
         }
 
+        Rectangle {
+            width: 1
+            height: 20
+            color: Theme.borderSubtle
+        }
+
+        // Toggle Item Numbers ("num" button, OFF by default)
+        Rectangle {
+            implicitWidth: numRow.implicitWidth + 16
+            implicitHeight: 26
+            radius: Theme.radiusSmall
+            color: root.controller.showRowNumbers ? Theme.rowSelected : (numMouse.containsMouse ? Theme.rowHover : Theme.bgHeader)
+            border.color: root.controller.showRowNumbers ? Theme.borderFocus : Theme.borderSubtle
+            border.width: 1
+
+            RowLayout {
+                id: numRow
+                anchors.centerIn: parent
+                spacing: 4
+
+                Text {
+                    text: "#"
+                    color: root.controller.showRowNumbers ? Theme.statusActive : Theme.textMuted
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: true
+                }
+
+                Text {
+                    text: "Num"
+                    color: root.controller.showRowNumbers ? Theme.textPrimary : Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: root.controller.showRowNumbers
+                }
+            }
+
+            MouseArea {
+                id: numMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.controller.toggleShowRowNumbers()
+            }
+        }
+
         Item {
             Layout.fillWidth: true
         }

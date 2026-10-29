@@ -1,4 +1,40 @@
+import re
+from typing import Tuple
 from urllib.parse import unquote, urlparse
+
+_NAT_SORT_REGEX = re.compile(r"(\d+)")
+
+
+def natural_sort_key(text: str) -> Tuple:
+    """
+    Produces a natural sort key so episodes and numbered files sort logically
+    (e.g. Episode 1, Episode 2, Episode 10 instead of 1, 10, 2).
+    """
+    if not text:
+        return ()
+    return tuple(
+        int(part) if part.isdigit() else part.lower()
+        for part in _NAT_SORT_REGEX.split(text)
+    )
+
+
+def extract_domain_from_url(url: str) -> str:
+    if not url:
+        return ""
+    low = url.strip().lower()
+    if low.startswith("magnet:?"):
+        return "bittorrent.org"
+    if low.endswith(".torrent") and not low.startswith(("http://", "https://", "ftp://")):
+        return "bittorrent.org"
+    try:
+        host = (urlparse(low).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host.endswith(".debrid.it") or host.endswith(".alldeb.ovh") or "alldebrid." in host:
+            return "alldebrid.com"
+        return host
+    except Exception:
+        return ""
 
 
 def format_bytes(num_bytes: int) -> str:

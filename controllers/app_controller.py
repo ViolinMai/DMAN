@@ -23,11 +23,46 @@ from backend.aria2_rpc import Aria2PollerThread, Aria2RPCClient
 from backend.remote_server import RemoteAPIServer
 from core.clipboard_watchdog import ClipboardWatchdog
 from core.config import AppConfig
-from core.formatters import format_bytes, format_eta, format_speed
+from core.formatters import extract_domain_from_url, format_bytes, format_eta, format_speed
 from core.link_parser import classify_links, extract_smart_links
 from core.settings import SettingsManager
 from core.system_integration import SystemIntegration
 from models.download_model import DownloadFilterProxyModel, DownloadModel
+
+
+class _AddDialogProbeWorker(QThread):
+    probeFinished = Signal(list)
+
+    def __init__(self, ad_client: AllDebridClient, links: List[str], parent=None) -> None:
+        super().__init__(parent)
+        self.ad_client = ad_client
+        self.links = links
+
+    def run(self) -> None:
+        try:
+            meta = self.ad_client.probe_links_metadata(self.links)
+            out = []
+            for item in meta.get("items", []):
+                sz = int(item.get("size", 0) or 0)
+                out.append({
+                    "url": item.get("link", ""),
+                    "filename": item.get("filename") or AllDebridClient.extract_url_filename(item.get("link", "")) or "File",
+                    "sizeBytes": sz,
+                    "sizeStr": format_bytes(sz) if sz > 0 else "Unknown",
+                    "priority": "Normal",
+                })
+            self.probeFinished.emit(out)
+        except Exception:
+            fallback = []
+            for l in self.links:
+                fallback.append({
+                    "url": l,
+                    "filename": AllDebridClient.extract_url_filename(l) or l,
+                    "sizeBytes": 0,
+                    "sizeStr": "Unknown",
+                    "priority": "Normal",
+                })
+            self.probeFinished.emit(fallback)
 
 
 class _ClipboardPreResolveWorker(QThread):
@@ -67,6 +102,7 @@ class AppController(QObject):
     remoteAddRequested = Signal(str, str, bool)
     requestShowMainWindow = Signal()
     logsChanged = Signal()
+    stagedAddFilesChanged = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -91,10 +127,17 @@ class AppController(QObject):
         self._global_eta_str = "~"
 
         self._selected_gid = ""
+        self._selected_gids: List[str] = []
         self._selected_item: Dict = {}
+
+        # Staged items inside AddLinkDialog
+        self._staged_add_files: List[Dict] = []
+        self._dialog_probe_worker: Optional[_AddDialogProbeWorker] = None
+        self._show_row_numbers: bool = False
 
         # Track status transitions for notifications & post-download actions
         self._known_statuses: Dict[str, str] = {}
+        self._notified_packages: Set[str] = set()
         self._had_active_downloads = False
 
         # AllDebrid account state
@@ -246,6 +289,14 @@ class AppController(QObject):
         return bool(self._settings.get("notify_on_complete", True))
 
     @Property(bool, notify=settingsChanged)
+    def notifyPackageOnly(self) -> bool:
+        return bool(self._settings.get("notify_package_only", True))
+
+    @Property(str, notify=settingsChanged)
+    def notifyPackageTemplate(self) -> str:
+        return str(self._settings.get("notify_package_template", "Package finished ({count} files): {name}"))
+
+    @Property(bool, notify=settingsChanged)
     def notifyOnError(self) -> bool:
         return bool(self._settings.get("notify_on_error", True))
 
@@ -360,9 +411,26 @@ class AppController(QObject):
     def selectedGid(self) -> str:
         return self._selected_gid
 
+    @Property("QVariantList", notify=selectionChanged)
+    def selectedGids(self) -> List[str]:
+        return self._selected_gids
+
     @Property("QVariantMap", notify=selectionChanged)
     def selectedItem(self) -> Dict:
         return self._selected_item
+
+    @Property("QVariantList", notify=stagedAddFilesChanged)
+    def stagedAddFiles(self) -> List[Dict]:
+        return self._staged_add_files
+
+    @Property(bool, notify=settingsChanged)
+    def showRowNumbers(self) -> bool:
+        return self._show_row_numbers
+
+    @Slot()
+    def toggleShowRowNumbers(self) -> None:
+        self._show_row_numbers = not self._show_row_numbers
+        self.settingsChanged.emit()
 
     # --- Native File/Folder Browsers ---
     @Slot(str, result=str)
@@ -397,6 +465,79 @@ class AppController(QObject):
             "links": links,
         }
 
+    @Slot(str)
+    def parseLinksToStagedModel(self, raw_text: str) -> None:
+        links = extract_smart_links(raw_text)
+        existing_by_url = {item["url"]: item for item in self._staged_add_files}
+        initial_list: List[Dict] = []
+        need_probe = False
+
+        for url in links:
+            if url in existing_by_url:
+                initial_list.append(existing_by_url[url])
+            else:
+                fn = AllDebridClient.extract_url_filename(url) or ("Magnet Link" if url.lower().startswith("magnet:?") else url)
+                dom = extract_domain_from_url(url)
+                initial_list.append({
+                    "url": url,
+                    "filename": fn,
+                    "sizeBytes": 0,
+                    "sizeStr": "Probing...",
+                    "priority": "Normal",
+                    "domain": dom,
+                    "faviconUrl": f"https://www.google.com/s2/favicons?sz=32&domain={dom}" if dom else "",
+                })
+                need_probe = True
+
+        self._staged_add_files = initial_list
+        self.stagedAddFilesChanged.emit()
+
+        if need_probe and links:
+            self._dialog_probe_worker = _AddDialogProbeWorker(self._ad_client, links, self)
+            self._dialog_probe_worker.probeFinished.connect(self._on_dialog_probe_finished)
+            self._dialog_probe_worker.start()
+
+    def _on_dialog_probe_finished(self, probed_items: List[Dict]) -> None:
+        probed_map = {item["url"]: item for item in probed_items}
+        updated: List[Dict] = []
+        for entry in self._staged_add_files:
+            url = entry["url"]
+            if url in probed_map:
+                p = probed_map[url]
+                dom = entry.get("domain") or extract_domain_from_url(url)
+                updated.append({
+                    "url": url,
+                    "filename": entry["filename"] if entry.get("customRenamed") else p["filename"],
+                    "sizeBytes": p["sizeBytes"],
+                    "sizeStr": p["sizeStr"],
+                    "priority": entry.get("priority", "Normal"),
+                    "domain": dom,
+                    "faviconUrl": f"https://www.google.com/s2/favicons?sz=32&domain={dom}" if dom else "",
+                })
+            else:
+                updated.append(entry)
+        self._staged_add_files = updated
+        self.stagedAddFilesChanged.emit()
+
+    @Slot("QVariantList", result=str)
+    def removeStagedFilesByUrls(self, urls_to_remove: List[str]) -> str:
+        rem_set = set(str(u) for u in urls_to_remove)
+        self._staged_add_files = [item for item in self._staged_add_files if item["url"] not in rem_set]
+        self.stagedAddFilesChanged.emit()
+        return "\n".join(item["url"] for item in self._staged_add_files)
+
+    @Slot("QVariantList", str)
+    def setStagedFilesPriority(self, target_urls: List[str], priority: str) -> None:
+        url_set = set(str(u) for u in target_urls)
+        updated = []
+        for item in self._staged_add_files:
+            copy_item = dict(item)
+            if copy_item["url"] in url_set:
+                copy_item["priority"] = priority
+            updated.append(copy_item)
+        self._staged_add_files = updated
+        self.stagedAddFilesChanged.emit()
+
     # --- Save Settings ---
     @Slot("QVariantMap")
     def saveSettings(self, new_settings: Dict) -> None:
@@ -417,10 +558,12 @@ class AppController(QObject):
             "clipboard_mode": str(new_settings.get("clipboardMode", "all")),
             "clipboard_auto_popup": bool(new_settings.get("clipboardAutoPopup", True)),
             "notify_on_complete": bool(new_settings.get("notifyOnComplete", True)),
+            "notify_package_only": bool(new_settings.get("notifyPackageOnly", True)),
             "notify_on_error": bool(new_settings.get("notifyOnError", True)),
             "notify_on_clipboard": bool(new_settings.get("notifyOnClipboard", True)),
             "notify_title_template": str(new_settings.get("notifyTitleTemplate", "DMAN - {event}")).strip(),
             "notify_complete_template": str(new_settings.get("notifyCompleteTemplate", "")).strip(),
+            "notify_package_template": str(new_settings.get("notifyPackageTemplate", "Package finished ({count} files): {name}")).strip(),
             "notify_error_template": str(new_settings.get("notifyErrorTemplate", "")).strip(),
             "notify_clipboard_template": str(new_settings.get("notifyClipboardTemplate", "")).strip(),
         }
@@ -540,12 +683,71 @@ class AppController(QObject):
         self.settingsChanged.emit()
         self.verifyAllDebridAccount(silent=False)
 
-    # --- Selection & Package / Item Actions ---
+    # --- Selection & Multi-Select Actions ---
     @Slot(str)
     def selectDownload(self, gid: str) -> None:
-        if self._selected_gid != gid:
-            self._selected_gid = gid
+        self._selected_gid = gid
+        self._selected_gids = [gid] if gid else []
         self._selected_item = self._source_model.get_by_gid(gid) if gid else {}
+        self.selectionChanged.emit()
+
+    @Property("QVariantMap", notify=selectionChanged)
+    def selectionCapabilities(self) -> Dict:
+        """
+        Inspects all currently selected items (or package children) so the Context Menu
+        only shows actions that make sense for the selected download states.
+        """
+        target_gid = self._selected_gid
+        if not target_gid and not self._selected_gids:
+            return {
+                "hasSelection": False,
+                "canResume": False,
+                "canPause": False,
+                "canRetry": False,
+                "canPrioritize": False,
+                "canChangeDir": False,
+                "hasSourceUri": False,
+            }
+
+        items = self._target_items_for_gid(target_gid)
+        if not items:
+            return {
+                "hasSelection": False,
+                "canResume": False,
+                "canPause": False,
+                "canRetry": False,
+                "canPrioritize": False,
+                "canChangeDir": False,
+                "hasSourceUri": False,
+            }
+
+        statuses = {i.get("status", "") for i in items}
+        can_resume = any(st in ("paused", "error", "missing") for st in statuses)
+        can_pause = any(st in ("active", "waiting") for st in statuses)
+        can_retry = any(
+            i.get("status") in ("error", "missing", "removed") or not i.get("fileExists", True)
+            for i in items
+        )
+        can_prioritize = any(st in ("active", "waiting", "paused") for st in statuses)
+        can_change_dir = any(st in ("active", "waiting", "paused") for st in statuses)
+        has_uri = bool(self._selected_item.get("sourceUri", ""))
+
+        return {
+            "hasSelection": True,
+            "canResume": can_resume,
+            "canPause": can_pause,
+            "canRetry": can_retry,
+            "canPrioritize": can_prioritize,
+            "canChangeDir": can_change_dir,
+            "hasSourceUri": has_uri,
+        }
+
+    @Slot("QVariantList", str)
+    def setSelectionList(self, gids: List[str], primary_gid: str = "") -> None:
+        clean_gids = [str(g) for g in gids if g]
+        self._selected_gids = clean_gids
+        self._selected_gid = primary_gid if primary_gid else (clean_gids[-1] if clean_gids else "")
+        self._selected_item = self._source_model.get_by_gid(self._selected_gid) if self._selected_gid else {}
         self.selectionChanged.emit()
 
     @Slot(str, str, bool, bool)
@@ -575,33 +777,37 @@ class AppController(QObject):
             self._settings.set("default_download_dir", target_dir)
         self.settingsChanged.emit()
 
+        staged_prio_map = {item["url"]: item.get("priority", "Normal") for item in self._staged_add_files}
+
         if use_alldebrid and self.alldebridEnabled and self._ad_client.api_key:
-            direct_cdn_links: List[str] = []
-            hoster_links: List[str] = []
+            direct_aria2_links: List[str] = []
+            ad_supported_links: List[str] = []
 
             for l in links:
-                if AllDebridClient.is_direct_cdn_link(l):
-                    direct_cdn_links.append(l)
+                # Only route magnets, .torrent files, or explicitly supported AllDebrid hosters to AllDebridResolverWorker
+                if AllDebridClient.is_direct_cdn_link(l) or not self._ad_client.is_host_supported(l):
+                    direct_aria2_links.append(l)
                 else:
-                    hoster_links.append(l)
+                    ad_supported_links.append(l)
 
-            if direct_cdn_links:
-                _ctrl_logger.info("Fast-tracking %d direct Debrid CDN link(s) straight to aria2c.", len(direct_cdn_links))
-                for dlink in direct_cdn_links:
+            if direct_aria2_links:
+                _ctrl_logger.info("Fast-tracking %d direct link(s) straight to aria2c (bypassing AllDebrid).", len(direct_aria2_links))
+                for dlink in direct_aria2_links:
                     fn = AllDebridClient.extract_url_filename(dlink)
-                    self._enqueue_direct_aria2(dlink, target_dir, fn)
-                if not hoster_links:
-                    self.notificationEmitted.emit(f"Added {len(direct_cdn_links)} direct Debrid download(s).", False)
+                    prio = staged_prio_map.get(dlink, "Normal")
+                    self._enqueue_direct_aria2(dlink, target_dir, fn, priority=prio)
+                if not ad_supported_links:
+                    self.notificationEmitted.emit(f"Added {len(direct_aria2_links)} direct download(s) to aria2.", False)
                     return
 
-            _ctrl_logger.info("Dispatching %d link(s) to AllDebridResolverWorker.", len(hoster_links))
+            _ctrl_logger.info("Dispatching %d AllDebrid-supported item(s) to AllDebridResolverWorker.", len(ad_supported_links))
             self.notificationEmitted.emit(
-                f"Routing {len(hoster_links)} item(s) safely through AllDebrid...",
+                f"Routing {len(ad_supported_links)} supported item(s) through AllDebrid...",
                 False,
             )
             worker = AllDebridResolverWorker(
                 client=self._ad_client,
-                links=hoster_links,
+                links=ad_supported_links,
                 save_dir=target_dir,
                 use_cloud_magnets=self.alldebridCloudMagnets,
                 parent=self,
@@ -615,7 +821,8 @@ class AppController(QObject):
 
         added_count = 0
         for url in links:
-            if self._enqueue_direct_aria2(url, target_dir, ""):
+            prio = staged_prio_map.get(url, "Normal")
+            if self._enqueue_direct_aria2(url, target_dir, "", priority=prio):
                 added_count += 1
 
         if added_count > 0:
@@ -629,13 +836,24 @@ class AppController(QObject):
         self.logsChanged.emit()
         self.notificationEmitted.emit(message, is_error)
 
-    def _enqueue_direct_aria2(self, url: str, target_dir: str, custom_filename: str = "") -> bool:
+    def _enqueue_direct_aria2(self, url: str, target_dir: str, custom_filename: str = "", priority: str = "Normal") -> bool:
         try:
             Path(target_dir).mkdir(parents=True, exist_ok=True)
             gid = self._rpc_client.add_uri([url], target_dir, custom_filename=custom_filename)
-            _ctrl_logger.info("aria2c addUri OK -> GID=%s | File='%s' | Dir='%s'", gid, custom_filename or "(auto)", target_dir)
+            _ctrl_logger.info("aria2c addUri OK -> GID=%s | File='%s' | Prio='%s' | Dir='%s'", gid, custom_filename or "(auto)", priority, target_dir)
             if gid:
                 self._source_model.register_source_uri(gid, url)
+                self._source_model.set_priority_label(gid, priority)
+                if priority == "High":
+                    try:
+                        self._rpc_client.change_position(gid, 0, "POS_SET")
+                    except Exception:
+                        pass
+                elif priority == "Low":
+                    try:
+                        self._rpc_client.change_position(gid, 9999, "POS_SET")
+                    except Exception:
+                        pass
             self.logsChanged.emit()
             return True
         except Exception as exc:
@@ -663,11 +881,47 @@ class AppController(QObject):
         self.notificationEmitted.emit("Debug logs copied to clipboard.", False)
 
     def _target_items_for_gid(self, gid: str) -> List[Dict]:
-        if gid.startswith("PKG::"):
-            pkg_key = gid.split("PKG::", 1)[1]
-            return self._source_model.get_children_for_package(pkg_key)
-        item = self._source_model.get_by_gid(gid)
-        return [item] if item else []
+        gids_to_resolve = self._selected_gids if (gid in self._selected_gids and len(self._selected_gids) > 1) else ([gid] if gid else [])
+        collected: List[Dict] = []
+        seen_gids: Set[str] = set()
+        for g in gids_to_resolve:
+            if g.startswith("PKG::"):
+                pkg_key = g.split("PKG::", 1)[1]
+                for child in self._source_model.get_children_for_package(pkg_key):
+                    cg = child.get("gid", "")
+                    if cg and cg not in seen_gids:
+                        seen_gids.add(cg)
+                        collected.append(child)
+            else:
+                item = self._source_model.get_by_gid(g)
+                if item and not item.get("isPackage"):
+                    cg = item.get("gid", "")
+                    if cg and cg not in seen_gids:
+                        seen_gids.add(cg)
+                        collected.append(item)
+        return collected
+
+    @Slot(str, str)
+    def setDownloadPriority(self, gid: str, priority: str) -> None:
+        targets = self._target_items_for_gid(gid)
+        count = 0
+        for item in targets:
+            cg = item.get("gid", "")
+            if not cg:
+                continue
+            self._source_model.set_priority_label(cg, priority)
+            try:
+                if priority == "High":
+                    self._rpc_client.change_position(cg, 0, "POS_SET")
+                elif priority == "Low":
+                    self._rpc_client.change_position(cg, 9999, "POS_SET")
+                elif priority == "Normal":
+                    self._rpc_client.change_position(cg, 50, "POS_SET")
+            except Exception:
+                pass
+            count += 1
+        if count > 0:
+            self.notificationEmitted.emit(f"Set priority to {priority} for {count} file(s).", False)
 
     @Slot(str)
     def pauseDownload(self, gid: str) -> None:
@@ -866,17 +1120,37 @@ class AppController(QObject):
 
             # Fire custom OS notifications on status transition
             if old_status in ("active", "waiting") and new_status == "complete":
+                pkg_key = child.get("packageKey", "default")
+                pkg_children = self._source_model.get_children_for_package(pkg_key)
+
                 if self.notifyOnComplete:
-                    ctx = {
-                        "event": "Download Complete",
-                        "name": child["name"],
-                        "dir": child["saveDir"],
-                        "count": "1",
-                        "error": "",
-                    }
-                    title = SystemIntegration.format_template(self.notifyTitleTemplate, ctx)
-                    body = SystemIntegration.format_template(self.notifyCompleteTemplate, ctx)
-                    SystemIntegration.send_os_notification(title, body, self._tray_icon)
+                    if self.notifyPackageOnly:
+                        # Notify ONLY once when ALL files inside the parent package are complete
+                        if pkg_children and all(c.get("status") == "complete" for c in pkg_children):
+                            if pkg_key not in self._notified_packages:
+                                self._notified_packages.add(pkg_key)
+                                pkg_folder_name = Path(child["saveDir"]).name or child["saveDir"]
+                                ctx = {
+                                    "event": "Package Complete",
+                                    "name": pkg_folder_name,
+                                    "dir": child["saveDir"],
+                                    "count": str(len(pkg_children)),
+                                    "error": "",
+                                }
+                                title = SystemIntegration.format_template(self.notifyTitleTemplate, ctx)
+                                body = SystemIntegration.format_template(self.notifyPackageTemplate, ctx)
+                                SystemIntegration.send_os_notification(title, body, self._tray_icon)
+                    else:
+                        ctx = {
+                            "event": "Download Complete",
+                            "name": child["name"],
+                            "dir": child["saveDir"],
+                            "count": "1",
+                            "error": "",
+                        }
+                        title = SystemIntegration.format_template(self.notifyTitleTemplate, ctx)
+                        body = SystemIntegration.format_template(self.notifyCompleteTemplate, ctx)
+                        SystemIntegration.send_os_notification(title, body, self._tray_icon)
 
             elif old_status in ("active", "waiting") and new_status == "error":
                 if self.notifyOnError:

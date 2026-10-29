@@ -25,10 +25,12 @@ class SettingsManager:
         "clipboard_auto_popup": True,
         # Notifications Customization
         "notify_on_complete": True,
+        "notify_package_only": True,
         "notify_on_error": True,
         "notify_on_clipboard": True,
         "notify_title_template": "DMAN - {event}",
         "notify_complete_template": "Finished downloading: {name} ({dir})",
+        "notify_package_template": "Package finished ({count} files): {name}",
         "notify_error_template": "Download failed: {name} - {error}",
         "notify_clipboard_template": "Captured {count} download link(s) — Click to choose path & start",
         # Remote Web API Server

@@ -51,7 +51,7 @@ class Aria2RPCClient:
             f"--input-file={session_path}",
             f"--save-session={session_path}",
             "--save-session-interval=5",
-            "--force-save=true",
+            "--force-save=false",
             "--continue=true",
             "--auto-file-renaming=false",
             "--allow-overwrite=true",
@@ -104,7 +104,7 @@ class Aria2RPCClient:
             "min-split-size": min_split,
             "max-overall-download-limit": speed_limit_bytes,
             "bt-save-metadata": "false",
-            "force-save": "true",
+            "force-save": "false",
             "continue": "true",
         }
         try:
@@ -225,6 +225,11 @@ class Aria2RPCClient:
     def change_item_dir(self, gid: str, new_dir: str) -> None:
         self.call("aria2.changeOption", [gid, {"dir": new_dir}])
         self.save_session()
+
+    def change_position(self, gid: str, pos: int, how: str = "POS_SET") -> Any:
+        res = self.call("aria2.changePosition", [gid, pos, how])
+        self.save_session()
+        return res
 
     def pause(self, gid: str) -> Any:
         res = self.call("aria2.forcePause", [gid])

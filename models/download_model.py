@@ -14,10 +14,12 @@ from PySide6.QtCore import (
 
 from core.config import AppConfig
 from core.formatters import (
+    extract_domain_from_url,
     format_bytes,
     format_eta,
     format_speed,
     is_metadata_only_task,
+    natural_sort_key,
     resolve_display_name,
     resolve_package_name,
     resolve_primary_file_path,
@@ -52,8 +54,13 @@ class DownloadModel(QAbstractListModel):
     ChildCountRole = Qt.UserRole + 18
     SourceUriRole = Qt.UserRole + 19
     FileExistsRole = Qt.UserRole + 20
+    PriorityRole = Qt.UserRole + 21
+    DomainRole = Qt.UserRole + 22
+    FaviconUrlRole = Qt.UserRole + 23
+    ItemNumberRole = Qt.UserRole + 24
 
     def __init__(self, parent=None) -> None:
+        self._priorities: Dict[str, str] = {}
         super().__init__(parent)
         self._rows: List[Dict[str, Any]] = []
         self._collapsed_packages: Set[str] = set()
@@ -120,6 +127,10 @@ class DownloadModel(QAbstractListModel):
             self.ChildCountRole: b"childCount",
             self.SourceUriRole: b"sourceUri",
             self.FileExistsRole: b"fileExists",
+            self.PriorityRole: b"priority",
+            self.DomainRole: b"domain",
+            self.FaviconUrlRole: b"faviconUrl",
+            self.ItemNumberRole: b"itemNumber",
         }
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -153,6 +164,10 @@ class DownloadModel(QAbstractListModel):
             self.ChildCountRole: "childCount",
             self.SourceUriRole: "sourceUri",
             self.FileExistsRole: "fileExists",
+            self.PriorityRole: "priority",
+            self.DomainRole: "domain",
+            self.FaviconUrlRole: "faviconUrl",
+            self.ItemNumberRole: "itemNumber",
         }
         key = role_map.get(role)
         return item.get(key) if key else None
@@ -172,6 +187,13 @@ class DownloadModel(QAbstractListModel):
 
     def is_package_collapsed(self, package_key: str) -> bool:
         return package_key in self._collapsed_packages
+
+    def set_priority_label(self, gid: str, priority: str) -> None:
+        if gid:
+            self._priorities[gid] = priority
+            if gid in self._permanent_history:
+                self._permanent_history[gid]["priority"] = priority
+                self._save_permanent_history()
 
     def register_source_uri(self, gid: str, uri: str, save_dir: str = "", custom_filename: str = "") -> None:
         if gid and uri:
@@ -197,7 +219,20 @@ class DownloadModel(QAbstractListModel):
         updated["rawSpeedBps"] = 0
 
         st = updated.get("status", "complete")
+        src_uri = updated.get("sourceUri", "")
+        domain = updated.get("domain") or extract_domain_from_url(src_uri)
+        updated["domain"] = domain
+        updated["faviconUrl"] = f"https://www.google.com/s2/favicons?sz=32&domain={domain}" if domain else ""
+        updated.setdefault("itemNumber", 0)
+
         if st in ("complete", "missing"):
+            if primary_path:
+                aria2_ctrl = Path(primary_path + ".aria2")
+                if aria2_ctrl.exists():
+                    try:
+                        aria2_ctrl.unlink()
+                    except Exception:
+                        pass
             updated["status"] = "complete"
             updated["statusDisplay"] = "Finished" if file_exists else "Finished (Deleted from Disk)"
             updated["progress"] = 100.0
@@ -224,6 +259,14 @@ class DownloadModel(QAbstractListModel):
         if not primary_path and save_dir and name and not name.startswith("Task #"):
             primary_path = str(Path(save_dir) / name)
 
+        if status == "complete" and primary_path:
+            aria2_ctrl = Path(primary_path + ".aria2")
+            if aria2_ctrl.exists():
+                try:
+                    aria2_ctrl.unlink()
+                except Exception:
+                    pass
+
         file_exists = True
         if primary_path and status in ("complete", "paused"):
             file_exists = Path(primary_path).exists() or Path(primary_path + ".aria2").exists()
@@ -249,6 +292,8 @@ class DownloadModel(QAbstractListModel):
         }
 
         pkg_key = save_dir.replace("\\", "/").rstrip("/") or "default"
+        domain = extract_domain_from_url(source_uri)
+        favicon_url = f"https://www.google.com/s2/favicons?sz=32&domain={domain}" if domain else ""
 
         return {
             "gid": gid,
@@ -273,6 +318,10 @@ class DownloadModel(QAbstractListModel):
             "childCount": 0,
             "sourceUri": source_uri,
             "fileExists": file_exists,
+            "priority": self._priorities.get(gid, "Normal"),
+            "domain": domain,
+            "faviconUrl": favicon_url,
+            "itemNumber": 0,
             "updatedAt": int(time.time()),
         }
 
@@ -327,6 +376,10 @@ class DownloadModel(QAbstractListModel):
             "childCount": len(children),
             "sourceUri": "",
             "fileExists": True,
+            "priority": "",
+            "domain": "",
+            "faviconUrl": "",
+            "itemNumber": 0,
         }
 
     def sync_items(self, raw_items: List[Dict[str, Any]]) -> None:
@@ -372,8 +425,20 @@ class DownloadModel(QAbstractListModel):
                 packages_map[pk] = []
             packages_map[pk].append(child)
 
+        # Sort packages descending: newly added or recently updated batch sits at the very top
+        sorted_pkg_keys = sorted(
+            packages_map.keys(),
+            key=lambda pk: max((c.get("updatedAt", 0) for c in packages_map[pk]), default=0),
+            reverse=True,
+        )
+
         new_rows: List[Dict[str, Any]] = []
-        for pk, pkg_children in packages_map.items():
+        for pk in sorted_pkg_keys:
+            pkg_children = packages_map[pk]
+            # Inside the package, keep natural sorting (e.g. Episode 1, 2, 3...)
+            pkg_children.sort(key=lambda c: natural_sort_key(c.get("name", "")))
+            for idx_num, child_row in enumerate(pkg_children, start=1):
+                child_row["itemNumber"] = idx_num
             new_rows.append(self._build_package_header(pk, pkg_children))
             new_rows.extend(pkg_children)
 

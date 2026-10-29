@@ -593,6 +593,34 @@ class AllDebridClient:
             return list(magnets.values())
         return magnets if isinstance(magnets, list) else []
 
+    def is_host_supported(self, url: str) -> bool:
+        """
+        Returns True ONLY if the URL is a Magnet, local .torrent, an AllDebrid link/CDN,
+        or belongs to a domain explicitly listed in AllDebrid's supported hosts.
+        """
+        low = url.strip().lower()
+        if not low:
+            return False
+        if low.startswith("magnet:?") or low.endswith(".torrent"):
+            return True
+        if self.is_direct_cdn_link(url):
+            return True
+        try:
+            parsed = urllib.parse.urlparse(low)
+            host = (parsed.hostname or "").lower()
+            if not host:
+                return False
+            if "alldebrid." in host or host.endswith(".debrid.it") or host.endswith(".alldeb.ovh"):
+                return True
+            domains = self.get_supported_domains()
+            for dom in domains:
+                d = dom.lower().strip()
+                if d and (host == d or host.endswith("." + d)):
+                    return True
+        except Exception:
+            pass
+        return False
+
     @staticmethod
     def is_direct_cdn_link(url: str) -> bool:
         """
@@ -631,31 +659,55 @@ class AllDebridClient:
         infos = data.get("infos", [])
         return infos if isinstance(infos, list) else []
 
+    @staticmethod
+    def probe_direct_head_size(url: str) -> int:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                method="HEAD",
+            )
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
+                cl = resp.headers.get("Content-Length")
+                return int(cl) if cl and cl.isdigit() else 0
+        except Exception:
+            return 0
+
     def probe_links_metadata(self, links: List[str]) -> Dict[str, Any]:
         """
-        Probes link names and total sizes safely using /v4/link/infos (or direct URL parsing
-        for already-unrestricted CDN links) without burning download quotas.
+        Probes link names and total sizes safely using /v4/link/infos ONLY for supported
+        AllDebrid hosters, and HTTP HEAD for regular direct links or CDN links.
         """
         total_bytes = 0
         items: List[Dict[str, Any]] = []
         hoster_batch: List[str] = []
 
-        for link in links[:15]:
+        for link in links[:40]:
             low = link.lower()
             if low.startswith("magnet:?"):
                 items.append({"link": link, "filename": "Magnet Link", "size": 0, "type": "magnet"})
+            elif low.endswith(".torrent") and not low.startswith(("http://", "https://", "ftp://")):
+                fn = link.replace("\\", "/").split("/")[-1]
+                items.append({"link": link, "filename": fn, "size": 0, "type": "torrent"})
             elif self.is_direct_cdn_link(link):
                 fn = self.extract_url_filename(link) or "Direct Debrid File"
+                sz = self.probe_direct_head_size(link)
+                total_bytes += sz
                 items.append({
                     "link": link,
                     "directLink": link,
                     "filename": fn,
-                    "size": 0,
+                    "size": sz,
                     "host": "AllDebrid CDN",
                     "type": "direct_cdn",
                 })
-            else:
+            elif self._api_key and self.is_host_supported(link):
                 hoster_batch.append(link)
+            else:
+                fn = self.extract_url_filename(link) or link
+                sz = self.probe_direct_head_size(link)
+                total_bytes += sz
+                items.append({"link": link, "filename": fn, "size": sz, "type": "direct"})
 
         if hoster_batch and self._api_key:
             try:
@@ -664,7 +716,9 @@ class AllDebridClient:
                     if "error" in info:
                         orig = info.get("link", "")
                         fn = self.extract_url_filename(orig) or orig
-                        items.append({"link": orig, "filename": fn, "size": 0, "type": "direct"})
+                        sz = self.probe_direct_head_size(orig)
+                        total_bytes += sz
+                        items.append({"link": orig, "filename": fn, "size": sz, "type": "direct"})
                     else:
                         sz = int(info.get("size", 0) or 0)
                         fn = info.get("filename") or self.extract_url_filename(info.get("link", ""))
@@ -682,7 +736,9 @@ class AllDebridClient:
 
         for link in hoster_batch:
             fn = self.extract_url_filename(link) or link
-            items.append({"link": link, "filename": fn, "size": 0, "type": "direct"})
+            sz = self.probe_direct_head_size(link)
+            total_bytes += sz
+            items.append({"link": link, "filename": fn, "size": sz, "type": "direct"})
 
         return {"totalBytes": total_bytes, "items": items}
 
@@ -805,6 +861,11 @@ class AllDebridResolverWorker(QThread):
             fn = AllDebridClient.extract_url_filename(url)
             _ad_logger.info("Direct CDN link detected -> bypassing unlock: %s (file='%s')", url, fn)
             self.directLinkReady.emit(url, target_dir, fn)
+            return
+
+        if not self.client.is_host_supported(url):
+            _ad_logger.info("Direct non-AllDebrid URL detected -> handing straight to aria2c: %s", url)
+            self.fallbackToAria2.emit(url, target_dir)
             return
 
         try:
@@ -1054,7 +1115,7 @@ class Aria2RPCClient:
             f"--input-file={session_path}",
             f"--save-session={session_path}",
             "--save-session-interval=5",
-            "--force-save=true",
+            "--force-save=false",
             "--continue=true",
             "--auto-file-renaming=false",
             "--allow-overwrite=true",
@@ -1107,7 +1168,7 @@ class Aria2RPCClient:
             "min-split-size": min_split,
             "max-overall-download-limit": speed_limit_bytes,
             "bt-save-metadata": "false",
-            "force-save": "true",
+            "force-save": "false",
             "continue": "true",
         }
         try:
@@ -1228,6 +1289,11 @@ class Aria2RPCClient:
     def change_item_dir(self, gid: str, new_dir: str) -> None:
         self.call("aria2.changeOption", [gid, {"dir": new_dir}])
         self.save_session()
+
+    def change_position(self, gid: str, pos: int, how: str = "POS_SET") -> Any:
+        res = self.call("aria2.changePosition", [gid, pos, how])
+        self.save_session()
+        return res
 
     def pause(self, gid: str) -> Any:
         res = self.call("aria2.forcePause", [gid])
@@ -1941,11 +2007,46 @@ from backend.aria2_rpc import Aria2PollerThread, Aria2RPCClient
 from backend.remote_server import RemoteAPIServer
 from core.clipboard_watchdog import ClipboardWatchdog
 from core.config import AppConfig
-from core.formatters import format_bytes, format_eta, format_speed
+from core.formatters import extract_domain_from_url, format_bytes, format_eta, format_speed
 from core.link_parser import classify_links, extract_smart_links
 from core.settings import SettingsManager
 from core.system_integration import SystemIntegration
 from models.download_model import DownloadFilterProxyModel, DownloadModel
+
+
+class _AddDialogProbeWorker(QThread):
+    probeFinished = Signal(list)
+
+    def __init__(self, ad_client: AllDebridClient, links: List[str], parent=None) -> None:
+        super().__init__(parent)
+        self.ad_client = ad_client
+        self.links = links
+
+    def run(self) -> None:
+        try:
+            meta = self.ad_client.probe_links_metadata(self.links)
+            out = []
+            for item in meta.get("items", []):
+                sz = int(item.get("size", 0) or 0)
+                out.append({
+                    "url": item.get("link", ""),
+                    "filename": item.get("filename") or AllDebridClient.extract_url_filename(item.get("link", "")) or "File",
+                    "sizeBytes": sz,
+                    "sizeStr": format_bytes(sz) if sz > 0 else "Unknown",
+                    "priority": "Normal",
+                })
+            self.probeFinished.emit(out)
+        except Exception:
+            fallback = []
+            for l in self.links:
+                fallback.append({
+                    "url": l,
+                    "filename": AllDebridClient.extract_url_filename(l) or l,
+                    "sizeBytes": 0,
+                    "sizeStr": "Unknown",
+                    "priority": "Normal",
+                })
+            self.probeFinished.emit(fallback)
 
 
 class _ClipboardPreResolveWorker(QThread):
@@ -1985,6 +2086,7 @@ class AppController(QObject):
     remoteAddRequested = Signal(str, str, bool)
     requestShowMainWindow = Signal()
     logsChanged = Signal()
+    stagedAddFilesChanged = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -2009,10 +2111,17 @@ class AppController(QObject):
         self._global_eta_str = "~"
 
         self._selected_gid = ""
+        self._selected_gids: List[str] = []
         self._selected_item: Dict = {}
+
+        # Staged items inside AddLinkDialog
+        self._staged_add_files: List[Dict] = []
+        self._dialog_probe_worker: Optional[_AddDialogProbeWorker] = None
+        self._show_row_numbers: bool = False
 
         # Track status transitions for notifications & post-download actions
         self._known_statuses: Dict[str, str] = {}
+        self._notified_packages: Set[str] = set()
         self._had_active_downloads = False
 
         # AllDebrid account state
@@ -2164,6 +2273,14 @@ class AppController(QObject):
         return bool(self._settings.get("notify_on_complete", True))
 
     @Property(bool, notify=settingsChanged)
+    def notifyPackageOnly(self) -> bool:
+        return bool(self._settings.get("notify_package_only", True))
+
+    @Property(str, notify=settingsChanged)
+    def notifyPackageTemplate(self) -> str:
+        return str(self._settings.get("notify_package_template", "Package finished ({count} files): {name}"))
+
+    @Property(bool, notify=settingsChanged)
     def notifyOnError(self) -> bool:
         return bool(self._settings.get("notify_on_error", True))
 
@@ -2278,9 +2395,26 @@ class AppController(QObject):
     def selectedGid(self) -> str:
         return self._selected_gid
 
+    @Property("QVariantList", notify=selectionChanged)
+    def selectedGids(self) -> List[str]:
+        return self._selected_gids
+
     @Property("QVariantMap", notify=selectionChanged)
     def selectedItem(self) -> Dict:
         return self._selected_item
+
+    @Property("QVariantList", notify=stagedAddFilesChanged)
+    def stagedAddFiles(self) -> List[Dict]:
+        return self._staged_add_files
+
+    @Property(bool, notify=settingsChanged)
+    def showRowNumbers(self) -> bool:
+        return self._show_row_numbers
+
+    @Slot()
+    def toggleShowRowNumbers(self) -> None:
+        self._show_row_numbers = not self._show_row_numbers
+        self.settingsChanged.emit()
 
     # --- Native File/Folder Browsers ---
     @Slot(str, result=str)
@@ -2315,6 +2449,79 @@ class AppController(QObject):
             "links": links,
         }
 
+    @Slot(str)
+    def parseLinksToStagedModel(self, raw_text: str) -> None:
+        links = extract_smart_links(raw_text)
+        existing_by_url = {item["url"]: item for item in self._staged_add_files}
+        initial_list: List[Dict] = []
+        need_probe = False
+
+        for url in links:
+            if url in existing_by_url:
+                initial_list.append(existing_by_url[url])
+            else:
+                fn = AllDebridClient.extract_url_filename(url) or ("Magnet Link" if url.lower().startswith("magnet:?") else url)
+                dom = extract_domain_from_url(url)
+                initial_list.append({
+                    "url": url,
+                    "filename": fn,
+                    "sizeBytes": 0,
+                    "sizeStr": "Probing...",
+                    "priority": "Normal",
+                    "domain": dom,
+                    "faviconUrl": f"https://www.google.com/s2/favicons?sz=32&domain={dom}" if dom else "",
+                })
+                need_probe = True
+
+        self._staged_add_files = initial_list
+        self.stagedAddFilesChanged.emit()
+
+        if need_probe and links:
+            self._dialog_probe_worker = _AddDialogProbeWorker(self._ad_client, links, self)
+            self._dialog_probe_worker.probeFinished.connect(self._on_dialog_probe_finished)
+            self._dialog_probe_worker.start()
+
+    def _on_dialog_probe_finished(self, probed_items: List[Dict]) -> None:
+        probed_map = {item["url"]: item for item in probed_items}
+        updated: List[Dict] = []
+        for entry in self._staged_add_files:
+            url = entry["url"]
+            if url in probed_map:
+                p = probed_map[url]
+                dom = entry.get("domain") or extract_domain_from_url(url)
+                updated.append({
+                    "url": url,
+                    "filename": entry["filename"] if entry.get("customRenamed") else p["filename"],
+                    "sizeBytes": p["sizeBytes"],
+                    "sizeStr": p["sizeStr"],
+                    "priority": entry.get("priority", "Normal"),
+                    "domain": dom,
+                    "faviconUrl": f"https://www.google.com/s2/favicons?sz=32&domain={dom}" if dom else "",
+                })
+            else:
+                updated.append(entry)
+        self._staged_add_files = updated
+        self.stagedAddFilesChanged.emit()
+
+    @Slot("QVariantList", result=str)
+    def removeStagedFilesByUrls(self, urls_to_remove: List[str]) -> str:
+        rem_set = set(str(u) for u in urls_to_remove)
+        self._staged_add_files = [item for item in self._staged_add_files if item["url"] not in rem_set]
+        self.stagedAddFilesChanged.emit()
+        return "\n".join(item["url"] for item in self._staged_add_files)
+
+    @Slot("QVariantList", str)
+    def setStagedFilesPriority(self, target_urls: List[str], priority: str) -> None:
+        url_set = set(str(u) for u in target_urls)
+        updated = []
+        for item in self._staged_add_files:
+            copy_item = dict(item)
+            if copy_item["url"] in url_set:
+                copy_item["priority"] = priority
+            updated.append(copy_item)
+        self._staged_add_files = updated
+        self.stagedAddFilesChanged.emit()
+
     # --- Save Settings ---
     @Slot("QVariantMap")
     def saveSettings(self, new_settings: Dict) -> None:
@@ -2335,10 +2542,12 @@ class AppController(QObject):
             "clipboard_mode": str(new_settings.get("clipboardMode", "all")),
             "clipboard_auto_popup": bool(new_settings.get("clipboardAutoPopup", True)),
             "notify_on_complete": bool(new_settings.get("notifyOnComplete", True)),
+            "notify_package_only": bool(new_settings.get("notifyPackageOnly", True)),
             "notify_on_error": bool(new_settings.get("notifyOnError", True)),
             "notify_on_clipboard": bool(new_settings.get("notifyOnClipboard", True)),
             "notify_title_template": str(new_settings.get("notifyTitleTemplate", "DMAN - {event}")).strip(),
             "notify_complete_template": str(new_settings.get("notifyCompleteTemplate", "")).strip(),
+            "notify_package_template": str(new_settings.get("notifyPackageTemplate", "Package finished ({count} files): {name}")).strip(),
             "notify_error_template": str(new_settings.get("notifyErrorTemplate", "")).strip(),
             "notify_clipboard_template": str(new_settings.get("notifyClipboardTemplate", "")).strip(),
         }
@@ -2458,12 +2667,71 @@ class AppController(QObject):
         self.settingsChanged.emit()
         self.verifyAllDebridAccount(silent=False)
 
-    # --- Selection & Package / Item Actions ---
+    # --- Selection & Multi-Select Actions ---
     @Slot(str)
     def selectDownload(self, gid: str) -> None:
-        if self._selected_gid != gid:
-            self._selected_gid = gid
+        self._selected_gid = gid
+        self._selected_gids = [gid] if gid else []
         self._selected_item = self._source_model.get_by_gid(gid) if gid else {}
+        self.selectionChanged.emit()
+
+    @Property("QVariantMap", notify=selectionChanged)
+    def selectionCapabilities(self) -> Dict:
+        """
+        Inspects all currently selected items (or package children) so the Context Menu
+        only shows actions that make sense for the selected download states.
+        """
+        target_gid = self._selected_gid
+        if not target_gid and not self._selected_gids:
+            return {
+                "hasSelection": False,
+                "canResume": False,
+                "canPause": False,
+                "canRetry": False,
+                "canPrioritize": False,
+                "canChangeDir": False,
+                "hasSourceUri": False,
+            }
+
+        items = self._target_items_for_gid(target_gid)
+        if not items:
+            return {
+                "hasSelection": False,
+                "canResume": False,
+                "canPause": False,
+                "canRetry": False,
+                "canPrioritize": False,
+                "canChangeDir": False,
+                "hasSourceUri": False,
+            }
+
+        statuses = {i.get("status", "") for i in items}
+        can_resume = any(st in ("paused", "error", "missing") for st in statuses)
+        can_pause = any(st in ("active", "waiting") for st in statuses)
+        can_retry = any(
+            i.get("status") in ("error", "missing", "removed") or not i.get("fileExists", True)
+            for i in items
+        )
+        can_prioritize = any(st in ("active", "waiting", "paused") for st in statuses)
+        can_change_dir = any(st in ("active", "waiting", "paused") for st in statuses)
+        has_uri = bool(self._selected_item.get("sourceUri", ""))
+
+        return {
+            "hasSelection": True,
+            "canResume": can_resume,
+            "canPause": can_pause,
+            "canRetry": can_retry,
+            "canPrioritize": can_prioritize,
+            "canChangeDir": can_change_dir,
+            "hasSourceUri": has_uri,
+        }
+
+    @Slot("QVariantList", str)
+    def setSelectionList(self, gids: List[str], primary_gid: str = "") -> None:
+        clean_gids = [str(g) for g in gids if g]
+        self._selected_gids = clean_gids
+        self._selected_gid = primary_gid if primary_gid else (clean_gids[-1] if clean_gids else "")
+        self._selected_item = self._source_model.get_by_gid(self._selected_gid) if self._selected_gid else {}
         self.selectionChanged.emit()
 
     @Slot(str, str, bool, bool)
@@ -2493,33 +2761,37 @@ class AppController(QObject):
             self._settings.set("default_download_dir", target_dir)
         self.settingsChanged.emit()
 
+        staged_prio_map = {item["url"]: item.get("priority", "Normal") for item in self._staged_add_files}
+
         if use_alldebrid and self.alldebridEnabled and self._ad_client.api_key:
-            direct_cdn_links: List[str] = []
-            hoster_links: List[str] = []
+            direct_aria2_links: List[str] = []
+            ad_supported_links: List[str] = []
 
             for l in links:
-                if AllDebridClient.is_direct_cdn_link(l):
-                    direct_cdn_links.append(l)
+                # Only route magnets, .torrent files, or explicitly supported AllDebrid hosters to AllDebridResolverWorker
+                if AllDebridClient.is_direct_cdn_link(l) or not self._ad_client.is_host_supported(l):
+                    direct_aria2_links.append(l)
                 else:
-                    hoster_links.append(l)
+                    ad_supported_links.append(l)
 
-            if direct_cdn_links:
-                _ctrl_logger.info("Fast-tracking %d direct Debrid CDN link(s) straight to aria2c.", len(direct_cdn_links))
-                for dlink in direct_cdn_links:
+            if direct_aria2_links:
+                _ctrl_logger.info("Fast-tracking %d direct link(s) straight to aria2c (bypassing AllDebrid).", len(direct_aria2_links))
+                for dlink in direct_aria2_links:
                     fn = AllDebridClient.extract_url_filename(dlink)
-                    self._enqueue_direct_aria2(dlink, target_dir, fn)
-                if not hoster_links:
-                    self.notificationEmitted.emit(f"Added {len(direct_cdn_links)} direct Debrid download(s).", False)
+                    prio = staged_prio_map.get(dlink, "Normal")
+                    self._enqueue_direct_aria2(dlink, target_dir, fn, priority=prio)
+                if not ad_supported_links:
+                    self.notificationEmitted.emit(f"Added {len(direct_aria2_links)} direct download(s) to aria2.", False)
                     return
 
-            _ctrl_logger.info("Dispatching %d link(s) to AllDebridResolverWorker.", len(hoster_links))
+            _ctrl_logger.info("Dispatching %d AllDebrid-supported item(s) to AllDebridResolverWorker.", len(ad_supported_links))
             self.notificationEmitted.emit(
-                f"Routing {len(hoster_links)} item(s) safely through AllDebrid...",
+                f"Routing {len(ad_supported_links)} supported item(s) through AllDebrid...",
                 False,
             )
             worker = AllDebridResolverWorker(
                 client=self._ad_client,
-                links=hoster_links,
+                links=ad_supported_links,
                 save_dir=target_dir,
                 use_cloud_magnets=self.alldebridCloudMagnets,
                 parent=self,
@@ -2533,7 +2805,8 @@ class AppController(QObject):
 
         added_count = 0
         for url in links:
-            if self._enqueue_direct_aria2(url, target_dir, ""):
+            prio = staged_prio_map.get(url, "Normal")
+            if self._enqueue_direct_aria2(url, target_dir, "", priority=prio):
                 added_count += 1
 
         if added_count > 0:
@@ -2547,13 +2820,24 @@ class AppController(QObject):
         self.logsChanged.emit()
         self.notificationEmitted.emit(message, is_error)
 
-    def _enqueue_direct_aria2(self, url: str, target_dir: str, custom_filename: str = "") -> bool:
+    def _enqueue_direct_aria2(self, url: str, target_dir: str, custom_filename: str = "", priority: str = "Normal") -> bool:
         try:
             Path(target_dir).mkdir(parents=True, exist_ok=True)
             gid = self._rpc_client.add_uri([url], target_dir, custom_filename=custom_filename)
-            _ctrl_logger.info("aria2c addUri OK -> GID=%s | File='%s' | Dir='%s'", gid, custom_filename or "(auto)", target_dir)
+            _ctrl_logger.info("aria2c addUri OK -> GID=%s | File='%s' | Prio='%s' | Dir='%s'", gid, custom_filename or "(auto)", priority, target_dir)
             if gid:
                 self._source_model.register_source_uri(gid, url)
+                self._source_model.set_priority_label(gid, priority)
+                if priority == "High":
+                    try:
+                        self._rpc_client.change_position(gid, 0, "POS_SET")
+                    except Exception:
+                        pass
+                elif priority == "Low":
+                    try:
+                        self._rpc_client.change_position(gid, 9999, "POS_SET")
+                    except Exception:
+                        pass
             self.logsChanged.emit()
             return True
         except Exception as exc:
@@ -2581,11 +2865,47 @@ class AppController(QObject):
         self.notificationEmitted.emit("Debug logs copied to clipboard.", False)
 
     def _target_items_for_gid(self, gid: str) -> List[Dict]:
-        if gid.startswith("PKG::"):
-            pkg_key = gid.split("PKG::", 1)[1]
-            return self._source_model.get_children_for_package(pkg_key)
-        item = self._source_model.get_by_gid(gid)
-        return [item] if item else []
+        gids_to_resolve = self._selected_gids if (gid in self._selected_gids and len(self._selected_gids) > 1) else ([gid] if gid else [])
+        collected: List[Dict] = []
+        seen_gids: Set[str] = set()
+        for g in gids_to_resolve:
+            if g.startswith("PKG::"):
+                pkg_key = g.split("PKG::", 1)[1]
+                for child in self._source_model.get_children_for_package(pkg_key):
+                    cg = child.get("gid", "")
+                    if cg and cg not in seen_gids:
+                        seen_gids.add(cg)
+                        collected.append(child)
+            else:
+                item = self._source_model.get_by_gid(g)
+                if item and not item.get("isPackage"):
+                    cg = item.get("gid", "")
+                    if cg and cg not in seen_gids:
+                        seen_gids.add(cg)
+                        collected.append(item)
+        return collected
+
+    @Slot(str, str)
+    def setDownloadPriority(self, gid: str, priority: str) -> None:
+        targets = self._target_items_for_gid(gid)
+        count = 0
+        for item in targets:
+            cg = item.get("gid", "")
+            if not cg:
+                continue
+            self._source_model.set_priority_label(cg, priority)
+            try:
+                if priority == "High":
+                    self._rpc_client.change_position(cg, 0, "POS_SET")
+                elif priority == "Low":
+                    self._rpc_client.change_position(cg, 9999, "POS_SET")
+                elif priority == "Normal":
+                    self._rpc_client.change_position(cg, 50, "POS_SET")
+            except Exception:
+                pass
+            count += 1
+        if count > 0:
+            self.notificationEmitted.emit(f"Set priority to {priority} for {count} file(s).", False)
 
     @Slot(str)
     def pauseDownload(self, gid: str) -> None:
@@ -2784,17 +3104,37 @@ class AppController(QObject):
 
             # Fire custom OS notifications on status transition
             if old_status in ("active", "waiting") and new_status == "complete":
+                pkg_key = child.get("packageKey", "default")
+                pkg_children = self._source_model.get_children_for_package(pkg_key)
+
                 if self.notifyOnComplete:
-                    ctx = {
-                        "event": "Download Complete",
-                        "name": child["name"],
-                        "dir": child["saveDir"],
-                        "count": "1",
-                        "error": "",
-                    }
-                    title = SystemIntegration.format_template(self.notifyTitleTemplate, ctx)
-                    body = SystemIntegration.format_template(self.notifyCompleteTemplate, ctx)
-                    SystemIntegration.send_os_notification(title, body, self._tray_icon)
+                    if self.notifyPackageOnly:
+                        # Notify ONLY once when ALL files inside the parent package are complete
+                        if pkg_children and all(c.get("status") == "complete" for c in pkg_children):
+                            if pkg_key not in self._notified_packages:
+                                self._notified_packages.add(pkg_key)
+                                pkg_folder_name = Path(child["saveDir"]).name or child["saveDir"]
+                                ctx = {
+                                    "event": "Package Complete",
+                                    "name": pkg_folder_name,
+                                    "dir": child["saveDir"],
+                                    "count": str(len(pkg_children)),
+                                    "error": "",
+                                }
+                                title = SystemIntegration.format_template(self.notifyTitleTemplate, ctx)
+                                body = SystemIntegration.format_template(self.notifyPackageTemplate, ctx)
+                                SystemIntegration.send_os_notification(title, body, self._tray_icon)
+                    else:
+                        ctx = {
+                            "event": "Download Complete",
+                            "name": child["name"],
+                            "dir": child["saveDir"],
+                            "count": "1",
+                            "error": "",
+                        }
+                        title = SystemIntegration.format_template(self.notifyTitleTemplate, ctx)
+                        body = SystemIntegration.format_template(self.notifyCompleteTemplate, ctx)
+                        SystemIntegration.send_os_notification(title, body, self._tray_icon)
 
             elif old_status in ("active", "waiting") and new_status == "error":
                 if self.notifyOnError:
@@ -3065,7 +3405,43 @@ class AppConfig:
 --- FILE: ./core/formatters.py ---
 ================================================================================
 
+import re
+from typing import Tuple
 from urllib.parse import unquote, urlparse
+
+_NAT_SORT_REGEX = re.compile(r"(\d+)")
+
+
+def natural_sort_key(text: str) -> Tuple:
+    """
+    Produces a natural sort key so episodes and numbered files sort logically
+    (e.g. Episode 1, Episode 2, Episode 10 instead of 1, 10, 2).
+    """
+    if not text:
+        return ()
+    return tuple(
+        int(part) if part.isdigit() else part.lower()
+        for part in _NAT_SORT_REGEX.split(text)
+    )
+
+
+def extract_domain_from_url(url: str) -> str:
+    if not url:
+        return ""
+    low = url.strip().lower()
+    if low.startswith("magnet:?"):
+        return "bittorrent.org"
+    if low.endswith(".torrent") and not low.startswith(("http://", "https://", "ftp://")):
+        return "bittorrent.org"
+    try:
+        host = (urlparse(low).hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host.endswith(".debrid.it") or host.endswith(".alldeb.ovh") or "alldebrid." in host:
+            return "alldebrid.com"
+        return host
+    except Exception:
+        return ""
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -3314,10 +3690,12 @@ class SettingsManager:
         "clipboard_auto_popup": True,
         # Notifications Customization
         "notify_on_complete": True,
+        "notify_package_only": True,
         "notify_on_error": True,
         "notify_on_clipboard": True,
         "notify_title_template": "DMAN - {event}",
         "notify_complete_template": "Finished downloading: {name} ({dir})",
+        "notify_package_template": "Package finished ({count} files): {name}",
         "notify_error_template": "Download failed: {name} - {error}",
         "notify_clipboard_template": "Captured {count} download link(s) — Click to choose path & start",
         # Remote Web API Server
@@ -3539,10 +3917,12 @@ from PySide6.QtCore import (
 
 from core.config import AppConfig
 from core.formatters import (
+    extract_domain_from_url,
     format_bytes,
     format_eta,
     format_speed,
     is_metadata_only_task,
+    natural_sort_key,
     resolve_display_name,
     resolve_package_name,
     resolve_primary_file_path,
@@ -3577,8 +3957,13 @@ class DownloadModel(QAbstractListModel):
     ChildCountRole = Qt.UserRole + 18
     SourceUriRole = Qt.UserRole + 19
     FileExistsRole = Qt.UserRole + 20
+    PriorityRole = Qt.UserRole + 21
+    DomainRole = Qt.UserRole + 22
+    FaviconUrlRole = Qt.UserRole + 23
+    ItemNumberRole = Qt.UserRole + 24
 
     def __init__(self, parent=None) -> None:
+        self._priorities: Dict[str, str] = {}
         super().__init__(parent)
         self._rows: List[Dict[str, Any]] = []
         self._collapsed_packages: Set[str] = set()
@@ -3645,6 +4030,10 @@ class DownloadModel(QAbstractListModel):
             self.ChildCountRole: b"childCount",
             self.SourceUriRole: b"sourceUri",
             self.FileExistsRole: b"fileExists",
+            self.PriorityRole: b"priority",
+            self.DomainRole: b"domain",
+            self.FaviconUrlRole: b"faviconUrl",
+            self.ItemNumberRole: b"itemNumber",
         }
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -3678,6 +4067,10 @@ class DownloadModel(QAbstractListModel):
             self.ChildCountRole: "childCount",
             self.SourceUriRole: "sourceUri",
             self.FileExistsRole: "fileExists",
+            self.PriorityRole: "priority",
+            self.DomainRole: "domain",
+            self.FaviconUrlRole: "faviconUrl",
+            self.ItemNumberRole: "itemNumber",
         }
         key = role_map.get(role)
         return item.get(key) if key else None
@@ -3697,6 +4090,13 @@ class DownloadModel(QAbstractListModel):
 
     def is_package_collapsed(self, package_key: str) -> bool:
         return package_key in self._collapsed_packages
+
+    def set_priority_label(self, gid: str, priority: str) -> None:
+        if gid:
+            self._priorities[gid] = priority
+            if gid in self._permanent_history:
+                self._permanent_history[gid]["priority"] = priority
+                self._save_permanent_history()
 
     def register_source_uri(self, gid: str, uri: str, save_dir: str = "", custom_filename: str = "") -> None:
         if gid and uri:
@@ -3722,7 +4122,20 @@ class DownloadModel(QAbstractListModel):
         updated["rawSpeedBps"] = 0
 
         st = updated.get("status", "complete")
+        src_uri = updated.get("sourceUri", "")
+        domain = updated.get("domain") or extract_domain_from_url(src_uri)
+        updated["domain"] = domain
+        updated["faviconUrl"] = f"https://www.google.com/s2/favicons?sz=32&domain={domain}" if domain else ""
+        updated.setdefault("itemNumber", 0)
+
         if st in ("complete", "missing"):
+            if primary_path:
+                aria2_ctrl = Path(primary_path + ".aria2")
+                if aria2_ctrl.exists():
+                    try:
+                        aria2_ctrl.unlink()
+                    except Exception:
+                        pass
             updated["status"] = "complete"
             updated["statusDisplay"] = "Finished" if file_exists else "Finished (Deleted from Disk)"
             updated["progress"] = 100.0
@@ -3749,6 +4162,14 @@ class DownloadModel(QAbstractListModel):
         if not primary_path and save_dir and name and not name.startswith("Task #"):
             primary_path = str(Path(save_dir) / name)
 
+        if status == "complete" and primary_path:
+            aria2_ctrl = Path(primary_path + ".aria2")
+            if aria2_ctrl.exists():
+                try:
+                    aria2_ctrl.unlink()
+                except Exception:
+                    pass
+
         file_exists = True
         if primary_path and status in ("complete", "paused"):
             file_exists = Path(primary_path).exists() or Path(primary_path + ".aria2").exists()
@@ -3774,6 +4195,8 @@ class DownloadModel(QAbstractListModel):
         }
 
         pkg_key = save_dir.replace("\\", "/").rstrip("/") or "default"
+        domain = extract_domain_from_url(source_uri)
+        favicon_url = f"https://www.google.com/s2/favicons?sz=32&domain={domain}" if domain else ""
 
         return {
             "gid": gid,
@@ -3798,6 +4221,10 @@ class DownloadModel(QAbstractListModel):
             "childCount": 0,
             "sourceUri": source_uri,
             "fileExists": file_exists,
+            "priority": self._priorities.get(gid, "Normal"),
+            "domain": domain,
+            "faviconUrl": favicon_url,
+            "itemNumber": 0,
             "updatedAt": int(time.time()),
         }
 
@@ -3852,6 +4279,10 @@ class DownloadModel(QAbstractListModel):
             "childCount": len(children),
             "sourceUri": "",
             "fileExists": True,
+            "priority": "",
+            "domain": "",
+            "faviconUrl": "",
+            "itemNumber": 0,
         }
 
     def sync_items(self, raw_items: List[Dict[str, Any]]) -> None:
@@ -3897,8 +4328,20 @@ class DownloadModel(QAbstractListModel):
                 packages_map[pk] = []
             packages_map[pk].append(child)
 
+        # Sort packages descending: newly added or recently updated batch sits at the very top
+        sorted_pkg_keys = sorted(
+            packages_map.keys(),
+            key=lambda pk: max((c.get("updatedAt", 0) for c in packages_map[pk]), default=0),
+            reverse=True,
+        )
+
         new_rows: List[Dict[str, Any]] = []
-        for pk, pkg_children in packages_map.items():
+        for pk in sorted_pkg_keys:
+            pkg_children = packages_map[pk]
+            # Inside the package, keep natural sorting (e.g. Episode 1, 2, 3...)
+            pkg_children.sort(key=lambda c: natural_sort_key(c.get("name", "")))
+            for idx_num, child_row in enumerate(pkg_children, start=1):
+                child_row["itemNumber"] = idx_num
             new_rows.append(self._build_package_header(pk, pkg_children))
             new_rows.extend(pkg_children)
 
@@ -4167,7 +4610,7 @@ QtObject {
     readonly property color statusActive: "#6CC644"
     readonly property color statusPaused: "#E5C07B"
     readonly property color statusError: "#E06C75"
-    readonly property color statusFinished: "#73C991"
+    readonly property color statusFinished: "#C678DD"
 
     // Sizing & Spacing
     readonly property int fontSizeSmall: 11
@@ -4188,17 +4631,20 @@ QtObject {
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import ".."
 
-Popup {
+Window {
     id: root
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    anchors.centerIn: Overlay.overlay
-    width: Math.min(680, parent ? parent.width - 40 : 680)
-    height: 450
-    padding: 0
+    title: "DMAN - Add Download Links"
+    width: 780
+    height: 540
+    minimumWidth: 620
+    minimumHeight: 420
+    flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+    modality: Qt.NonModal
+    visible: false
+    color: Theme.bgPanel
 
     required property var controller
 
@@ -4208,6 +4654,64 @@ Popup {
     property bool makeDefaultDir: false
     property bool routeViaAlldebrid: true
     property string freeDiskSpace: ""
+    property bool showRawLinksView: false
+
+    // Multi-selection state for the staged files table
+    property var selectedUrls: []
+    property int lastClickedIndex: -1
+
+    function isUrlSelected(u) {
+        return root.selectedUrls.indexOf(u) !== -1
+    }
+
+    function selectSingleUrl(u, idx) {
+        root.selectedUrls = [u]
+        root.lastClickedIndex = idx
+    }
+
+    function toggleUrlSelection(u, idx) {
+        var copy = root.selectedUrls.slice()
+        var pos = copy.indexOf(u)
+        if (pos !== -1) {
+            copy.splice(pos, 1)
+        } else {
+            copy.push(u)
+        }
+        root.selectedUrls = copy
+        root.lastClickedIndex = idx
+    }
+
+    function selectRangeUrls(toIdx) {
+        var files = root.controller.stagedAddFiles
+        if (!files || files.length === 0) return
+        var start = root.lastClickedIndex >= 0 ? root.lastClickedIndex : 0
+        var low = Math.min(start, toIdx)
+        var high = Math.max(start, toIdx)
+        var copy = []
+        for (var i = low; i <= high; i++) {
+            if (files[i] && files[i].url) {
+                copy.push(files[i].url)
+            }
+        }
+        root.selectedUrls = copy
+    }
+
+    function selectAllStaged() {
+        var files = root.controller.stagedAddFiles
+        var copy = []
+        for (var i = 0; i < files.length; i++) {
+            copy.push(files[i].url)
+        }
+        root.selectedUrls = copy
+    }
+
+    function removeSelectedStagedFiles() {
+        if (root.selectedUrls.length === 0) return
+        var updatedText = root.controller.removeStagedFilesByUrls(root.selectedUrls)
+        urlInput.text = updatedText
+        root.selectedUrls = []
+        root.refreshLinkStats()
+    }
 
     function refreshLinkStats() {
         var stats = root.controller.analyzeLinksText(urlInput.text)
@@ -4215,6 +4719,7 @@ Popup {
         root.detectedHttp = stats.httpCount || 0
         root.detectedMagnets = stats.magnetCount || 0
         root.freeDiskSpace = root.controller.getDiskFreeSpaceStr(saveDirInput.text)
+        root.controller.parseLinksToStagedModel(urlInput.text)
     }
 
     function startImmediateDownload(targetDir) {
@@ -4233,25 +4738,106 @@ Popup {
     }
 
     function openWithFocus(prefillText) {
-        urlInput.text = prefillText ? prefillText : ""
+        if (prefillText && prefillText.length > 0) {
+            urlInput.text = prefillText
+        } else if (!root.visible) {
+            urlInput.text = ""
+        }
         saveDirInput.text = root.controller.defaultSaveDir
         subfolderInput.text = ""
         root.makeDefaultDir = false
         root.routeViaAlldebrid = root.controller.alldebridEnabled
+        root.showRawLinksView = false
+        root.selectedUrls = []
         root.refreshLinkStats()
-        root.open()
-        if (prefillText && prefillText.length > 0) {
-            saveDirInput.forceActiveFocus()
-        } else {
-            urlInput.forceActiveFocus()
+        root.show()
+        root.raise()
+        root.requestActivate()
+        saveDirInput.forceActiveFocus()
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        onActivated: root.close()
+    }
+
+    Shortcut {
+        sequence: "Delete"
+        onActivated: {
+            if (!root.showRawLinksView && root.selectedUrls.length > 0) {
+                root.removeSelectedStagedFiles()
+            }
         }
     }
 
-    background: Rectangle {
-        color: Theme.bgPanel
-        radius: Theme.radiusMedium
-        border.color: Theme.borderFocus
-        border.width: 1
+    Shortcut {
+        sequence: "Ctrl+A"
+        onActivated: {
+            if (!root.showRawLinksView) {
+                root.selectAllStaged()
+            }
+        }
+    }
+
+    component DarkStagedMenuItem: MenuItem {
+        id: stagedItemCtrl
+        property color textColor: Theme.textPrimary
+        implicitWidth: 220
+        implicitHeight: 30
+
+        contentItem: Text {
+            text: stagedItemCtrl.text
+            font.pixelSize: Theme.fontSizeNormal
+            color: stagedItemCtrl.textColor
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: 10
+        }
+
+        background: Rectangle {
+            color: stagedItemCtrl.highlighted ? Theme.rowSelected : "transparent"
+            radius: Theme.radiusSmall
+        }
+    }
+
+    // Dark-Mode Context Menu for Staged Files Table
+    Menu {
+        id: stagedContextMenu
+        width: 230
+        padding: 5
+
+        background: Rectangle {
+            color: Theme.bgPanel
+            border.color: Theme.borderFocus
+            border.width: 1
+            radius: Theme.radiusMedium
+        }
+
+        DarkStagedMenuItem {
+            text: "⬆ Priority: High (Download First)"
+            textColor: Theme.statusActive
+            onTriggered: root.controller.setStagedFilesPriority(root.selectedUrls, "High")
+        }
+        DarkStagedMenuItem {
+            text: "▬ Priority: Normal"
+            onTriggered: root.controller.setStagedFilesPriority(root.selectedUrls, "Normal")
+        }
+        DarkStagedMenuItem {
+            text: "⬇ Priority: Low"
+            onTriggered: root.controller.setStagedFilesPriority(root.selectedUrls, "Low")
+        }
+        MenuSeparator {
+            padding: 0
+            contentItem: Rectangle { implicitHeight: 1; color: Theme.borderSubtle }
+        }
+        DarkStagedMenuItem {
+            text: "Select All Files (Ctrl+A)"
+            onTriggered: root.selectAllStaged()
+        }
+        DarkStagedMenuItem {
+            text: "✕ Remove Selected File(s) (Del)"
+            textColor: Theme.statusError
+            onTriggered: root.removeSelectedStagedFiles()
+        }
     }
 
     ColumnLayout {
@@ -4259,22 +4845,51 @@ Popup {
         anchors.margins: 16
         spacing: 10
 
+        // Top Header Bar
         RowLayout {
             Layout.fillWidth: true
+            spacing: 10
 
             Text {
-                text: "Add New Download Link(s)"
+                text: "Add & Inspect Download Package"
                 color: Theme.textPrimary
-                font.pixelSize: 14
+                font.pixelSize: 15
                 font.bold: true
             }
 
             Item { Layout.fillWidth: true }
 
-            // Live Smart Link Detection Counter
+            Rectangle {
+                implicitWidth: pasteBtnTxt.implicitWidth + 18
+                implicitHeight: 26
+                radius: Theme.radiusSmall
+                color: pasteMouse.containsMouse ? Theme.rowHover : Theme.bgHeader
+                border.color: Theme.borderFocus
+
+                Text {
+                    id: pasteBtnTxt
+                    anchors.centerIn: parent
+                    text: "📋 Paste Links from Clipboard"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+
+                MouseArea {
+                    id: pasteMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        urlInput.paste()
+                        root.refreshLinkStats()
+                    }
+                }
+            }
+
             Rectangle {
                 implicitWidth: counterTxt.implicitWidth + 16
-                implicitHeight: 22
+                implicitHeight: 26
                 radius: Theme.radiusSmall
                 color: root.detectedTotal > 0 ? Theme.rowSelected : Theme.bgInput
                 border.color: root.detectedTotal > 0 ? Theme.borderFocus : Theme.borderSubtle
@@ -4283,43 +4898,322 @@ Popup {
                     id: counterTxt
                     anchors.centerIn: parent
                     text: root.detectedTotal > 0
-                          ? "Detected: " + root.detectedTotal + " link(s) (" + root.detectedHttp + " Direct, " + root.detectedMagnets + " Magnet)"
-                          : "Smart Parser: Paste any text or multiple links"
+                          ? "Files: " + root.detectedTotal + " (" + root.detectedHttp + " Direct, " + root.detectedMagnets + " Magnet)"
+                          : "No links staged"
                     color: root.detectedTotal > 0 ? Theme.textPrimary : Theme.textMuted
                     font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
                 }
             }
         }
 
-        Text {
-            text: "Paste links separated by spaces, newlines, or mixed inside text (automatically extracted):"
-            color: Theme.textSecondary
-            font.pixelSize: Theme.fontSizeNormal
-        }
-
-        ScrollView {
+        // Main Content Area: Either File Table View (Default) OR Raw Links Editor
+        Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            color: Theme.bgPrimary
+            radius: Theme.radiusSmall
+            border.color: Theme.borderSubtle
+            border.width: 1
+            clip: true
 
-            TextArea {
-                id: urlInput
-                placeholderText: "https://example.com/archive.part1.rar https://example.com/archive.part2.rar\nmagnet:?xt=urn:btih:..."
-                placeholderTextColor: Theme.textMuted
-                color: Theme.textPrimary
-                font.pixelSize: Theme.fontSizeNormal
-                selectByMouse: true
-                wrapMode: TextEdit.WrapAnywhere
-                onTextChanged: root.refreshLinkStats()
+            // 1. FILE LIST TABLE VIEW (Default)
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+                visible: !root.showRawLinksView
 
-                background: Rectangle {
-                    color: Theme.bgInput
-                    radius: Theme.radiusSmall
-                    border.color: urlInput.activeFocus ? Theme.borderFocus : Theme.borderSubtle
+                // Table Columns Header
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 28
+                    color: Theme.bgHeader
+                    border.color: Theme.borderSubtle
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        spacing: 8
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "File Name (Shift / Ctrl Multi-Select, Right-Click for Priority)"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+                        Text {
+                            Layout.preferredWidth: 100
+                            text: "Size"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+                        Text {
+                            Layout.preferredWidth: 85
+                            text: "Priority"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+                        Text {
+                            Layout.preferredWidth: 50
+                            text: "Action"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+                    }
+                }
+
+                ListView {
+                    id: stagedListView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: root.controller.stagedAddFiles
+                    boundsBehavior: Flickable.StopAtBounds
+
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    Text {
+                        anchors.centerIn: parent
+                        visible: stagedListView.count === 0
+                        text: "No files staged yet.\nClick '📋 Paste Links from Clipboard' or switch to 'Show Raw Links' below to paste URLs."
+                        horizontalAlignment: Text.AlignHCenter
+                        color: Theme.textMuted
+                        font.pixelSize: 12
+                    }
+
+                    delegate: Rectangle {
+                        width: stagedListView.width
+                        height: 30
+                        readonly property bool isRowSelected: root.isUrlSelected(modelData.url)
+
+                        color: {
+                            if (isRowSelected) return Theme.rowSelected
+                            if (itemMouse.containsMouse) return Theme.rowHover
+                            return (index % 2 === 0) ? Theme.rowEven : Theme.rowOdd
+                        }
+
+                        Timer {
+                            id: stagedHoverTimer
+                            interval: 1000
+                            repeat: false
+                            onTriggered: {
+                                if (itemMouse.containsMouse) {
+                                    stagedFullNameTip.visible = true
+                                }
+                            }
+                        }
+
+                        ToolTip {
+                            id: stagedFullNameTip
+                            x: Math.min(itemMouse.mouseX + 14, parent.width - implicitWidth - 10)
+                            y: itemMouse.mouseY + 18
+                            visible: false
+                            text: modelData.filename || ""
+                            delay: 0
+                            timeout: 6000
+
+                            contentItem: Text {
+                                text: stagedFullNameTip.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                            }
+
+                            background: Rectangle {
+                                color: Theme.bgHeader
+                                border.color: Theme.borderFocus
+                                border.width: 1
+                                radius: Theme.radiusSmall
+                            }
+                        }
+
+                        MouseArea {
+                            id: itemMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onEntered: stagedHoverTimer.restart()
+                            onExited: {
+                                stagedHoverTimer.stop()
+                                stagedFullNameTip.visible = false
+                            }
+                            onPositionChanged: {
+                                stagedFullNameTip.visible = false
+                                stagedHoverTimer.restart()
+                            }
+                            onClicked: function(mouse) {
+                                if (mouse.button === Qt.RightButton) {
+                                    if (!root.isUrlSelected(modelData.url)) {
+                                        root.selectSingleUrl(modelData.url, index)
+                                    }
+                                    stagedContextMenu.popup()
+                                    return
+                                }
+                                if (mouse.modifiers & Qt.ShiftModifier) {
+                                    root.selectRangeUrls(index)
+                                } else if (mouse.modifiers & Qt.ControlModifier) {
+                                    root.toggleUrlSelection(modelData.url, index)
+                                } else {
+                                    root.selectSingleUrl(modelData.url, index)
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            spacing: 8
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+
+                                Rectangle {
+                                    width: 8
+                                    height: 8
+                                    radius: 4
+                                    color: modelData.priority === "High" ? Theme.statusActive : (modelData.priority === "Low" ? Theme.textMuted : Theme.accentBlue)
+                                }
+
+                                Rectangle {
+                                    width: 16
+                                    height: 16
+                                    radius: 3
+                                    color: Theme.bgInput
+                                    border.color: Theme.borderSubtle
+                                    border.width: 1
+                                    clip: true
+
+                                    Image {
+                                        id: stagedFavicon
+                                        anchors.fill: parent
+                                        anchors.margins: 1
+                                        source: modelData.faviconUrl || ""
+                                        fillMode: Image.PreserveAspectFit
+                                        asynchronous: true
+                                        cache: true
+                                        visible: status === Image.Ready
+                                    }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: stagedFavicon.status !== Image.Ready
+                                        text: (modelData.domain && modelData.domain.length > 0) ? modelData.domain.charAt(0).toUpperCase() : "🌐"
+                                        color: Theme.accentBlue
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                    }
+                                }
+
+                                Text {
+                                    visible: root.controller.showRowNumbers
+                                    text: (index + 1) + "."
+                                    color: Theme.accentBlue
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: true
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.filename
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    elide: Text.ElideMiddle
+                                }
+                            }
+
+                            Text {
+                                Layout.preferredWidth: 100
+                                text: modelData.sizeStr
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeNormal
+                            }
+
+                            Rectangle {
+                                Layout.preferredWidth: 85
+                                implicitHeight: 20
+                                radius: 3
+                                color: modelData.priority === "High" ? "#244028" : (modelData.priority === "Low" ? "#25282E" : "#1F3247")
+                                border.color: modelData.priority === "High" ? Theme.statusActive : Theme.borderSubtle
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: modelData.priority
+                                    color: modelData.priority === "High" ? Theme.statusActive : Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: modelData.priority === "High"
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var nextP = modelData.priority === "Normal" ? "High" : (modelData.priority === "High" ? "Low" : "Normal")
+                                        root.controller.setStagedFilesPriority([modelData.url], nextP)
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.preferredWidth: 50
+                                implicitHeight: 22
+                                radius: 3
+                                color: delBtnMouse.containsMouse ? Theme.statusError : Theme.bgHeader
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✕"
+                                    color: "#FFFFFF"
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                }
+
+                                MouseArea {
+                                    id: delBtnMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var newTxt = root.controller.removeStagedFilesByUrls([modelData.url])
+                                        urlInput.text = newTxt
+                                        root.refreshLinkStats()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. RAW LINKS TEXT EDITOR (Toggled via bottom button)
+            ScrollView {
+                anchors.fill: parent
+                visible: root.showRawLinksView
+
+                TextArea {
+                    id: urlInput
+                    placeholderText: "Paste raw HTTP/HTTPS/Magnet links here (separated by spaces or newlines)..."
+                    placeholderTextColor: Theme.textMuted
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeNormal
+                    selectByMouse: true
+                    wrapMode: TextEdit.WrapAnywhere
+                    onTextChanged: root.refreshLinkStats()
+
+                    background: Rectangle {
+                        color: Theme.bgInput
+                    }
                 }
             }
         }
 
-        // Save Directory + Browse Button
+        // Save Directory + Subfolder + Browse Row
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -4333,7 +5227,7 @@ Popup {
             TextField {
                 id: saveDirInput
                 Layout.fillWidth: true
-                Layout.preferredHeight: 28
+                Layout.preferredHeight: 30
                 text: root.controller.defaultSaveDir
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
@@ -4352,9 +5246,9 @@ Popup {
 
             TextField {
                 id: subfolderInput
-                Layout.preferredWidth: 150
-                Layout.preferredHeight: 28
-                placeholderText: "+ Subfolder (optional)"
+                Layout.preferredWidth: 170
+                Layout.preferredHeight: 30
+                placeholderText: "+ Subfolder / Package Name"
                 placeholderTextColor: Theme.textMuted
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
@@ -4371,8 +5265,8 @@ Popup {
             }
 
             Rectangle {
-                implicitWidth: 85
-                implicitHeight: 28
+                implicitWidth: 88
+                implicitHeight: 30
                 radius: Theme.radiusSmall
                 color: browseMouse.containsMouse ? Theme.rowHover : Theme.bgHeader
                 border.color: Theme.borderSubtle
@@ -4406,13 +5300,13 @@ Popup {
 
             Text {
                 text: "Free Space: " + root.freeDiskSpace
-                color: Theme.statusFinished
+                color: Theme.statusActive
                 font.pixelSize: Theme.fontSizeSmall
                 font.bold: true
             }
 
             Text {
-                text: "| Quick Start in:"
+                text: "| 1-Click Start in:"
                 color: Theme.textMuted
                 font.pixelSize: Theme.fontSizeSmall
                 visible: root.controller.recentDownloadDirs.length > 0
@@ -4461,82 +5355,70 @@ Popup {
             Layout.fillWidth: true
             spacing: 18
 
-            // Checkbox: Set as Default Download Dir
-            RowLayout {
-                spacing: 6
-                Rectangle {
-                    width: 16
-                    height: 16
-                    radius: 3
-                    color: root.makeDefaultDir ? Theme.accentBlue : Theme.bgInput
-                    border.color: Theme.borderSubtle
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "✓"
-                        visible: root.makeDefaultDir
-                        color: "#FFFFFF"
-                        font.pixelSize: 11
-                        font.bold: true
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.makeDefaultDir = !root.makeDefaultDir
-                    }
-                }
-                Text {
-                    text: "Save as default download directory"
+            CheckBox {
+                id: defaultDirChk
+                checked: root.makeDefaultDir
+                onToggled: root.makeDefaultDir = checked
+                text: "Save as default download directory"
+                contentItem: Text {
+                    text: defaultDirChk.text
                     color: Theme.textSecondary
                     font.pixelSize: Theme.fontSizeNormal
+                    leftPadding: defaultDirChk.indicator.width + 6
+                    verticalAlignment: Text.AlignVCenter
                 }
             }
 
-            // Checkbox: Route via AllDebrid
-            RowLayout {
-                spacing: 6
+            CheckBox {
+                id: routeAdChk
                 visible: root.controller.alldebridEnabled
-                Rectangle {
-                    width: 16
-                    height: 16
-                    radius: 3
-                    color: root.routeViaAlldebrid ? Theme.statusActive : Theme.bgInput
-                    border.color: Theme.borderSubtle
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "✓"
-                        visible: root.routeViaAlldebrid
-                        color: "#FFFFFF"
-                        font.pixelSize: 11
-                        font.bold: true
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.routeViaAlldebrid = !root.routeViaAlldebrid
-                    }
-                }
-                Text {
-                    text: "Unrestrict via AllDebrid (Safe Rate-Limited)"
+                checked: root.routeViaAlldebrid
+                onToggled: root.routeViaAlldebrid = checked
+                text: "Unrestrict via AllDebrid"
+                contentItem: Text {
+                    text: routeAdChk.text
                     color: Theme.statusActive
                     font.pixelSize: Theme.fontSizeNormal
+                    leftPadding: routeAdChk.indicator.width + 6
+                    verticalAlignment: Text.AlignVCenter
                 }
             }
 
             Item { Layout.fillWidth: true }
         }
 
-        // Action Buttons
+        // Bottom Action Bar (Includes Toggle Raw Links Button)
         RowLayout {
             Layout.fillWidth: true
-            spacing: 10
+            spacing: 8
+
+            // Toggle Raw Links Button
+            Rectangle {
+                implicitWidth: toggleRawTxt.implicitWidth + 20
+                implicitHeight: 32
+                radius: Theme.radiusSmall
+                color: root.showRawLinksView ? Theme.rowSelected : Theme.bgHeader
+                border.color: root.showRawLinksView ? Theme.borderFocus : Theme.borderSubtle
+
+                Text {
+                    id: toggleRawTxt
+                    anchors.centerIn: parent
+                    text: root.showRawLinksView ? "📁 Show File Table View" : "🔗 Show / Edit Raw Links"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: true
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.showRawLinksView = !root.showRawLinksView
+                }
+            }
 
             Rectangle {
                 implicitWidth: 125
-                implicitHeight: 30
+                implicitHeight: 32
                 radius: Theme.radiusSmall
                 color: torrentBtnMouse.containsMouse ? Theme.rowHover : Theme.bgHeader
                 border.color: Theme.borderSubtle
@@ -4558,8 +5440,32 @@ Popup {
                         var tpath = root.controller.browseTorrentFile()
                         if (tpath !== "") {
                             urlInput.text = (urlInput.text ? urlInput.text + "\n" : "") + tpath
+                            root.refreshLinkStats()
                         }
                     }
+                }
+            }
+
+            Rectangle {
+                visible: !root.showRawLinksView && root.selectedUrls.length > 0
+                implicitWidth: 140
+                implicitHeight: 32
+                radius: Theme.radiusSmall
+                color: Theme.bgHeader
+                border.color: Theme.statusError
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "Remove Selected (" + root.selectedUrls.length + ")"
+                    color: Theme.statusError
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.removeSelectedStagedFiles()
                 }
             }
 
@@ -4567,7 +5473,7 @@ Popup {
 
             Rectangle {
                 implicitWidth: 90
-                implicitHeight: 30
+                implicitHeight: 32
                 radius: Theme.radiusSmall
                 color: cancelMouse.containsMouse ? Theme.rowHover : Theme.bgHeader
                 border.color: Theme.borderSubtle
@@ -4589,8 +5495,8 @@ Popup {
             }
 
             Rectangle {
-                implicitWidth: 145
-                implicitHeight: 30
+                implicitWidth: 155
+                implicitHeight: 32
                 radius: Theme.radiusSmall
                 opacity: root.detectedTotal > 0 ? 1.0 : 0.5
                 color: startMouse.containsMouse && root.detectedTotal > 0 ? "#4A89C7" : Theme.accentBlue
@@ -4598,7 +5504,7 @@ Popup {
                 Text {
                     anchors.centerIn: parent
                     text: root.detectedTotal > 1
-                          ? "Download (" + root.detectedTotal + ")"
+                          ? "Download (" + root.detectedTotal + " Files)"
                           : "Start Download"
                     color: "#FFFFFF"
                     font.pixelSize: Theme.fontSizeNormal
@@ -5023,8 +5929,211 @@ Rectangle {
     color: Theme.bgPrimary
     border.color: Theme.borderSubtle
     border.width: 1
+    focus: true
 
     required property var controller
+
+    // Multi-selection tracking
+    property int anchorIndex: -1
+
+    function isGidSelected(gid) {
+        return root.controller.selectedGids.indexOf(gid) !== -1
+    }
+
+    function selectSingleRow(gid, idx) {
+        root.anchorIndex = idx
+        root.controller.setSelectionList([gid], gid)
+    }
+
+    function toggleRowSelection(gid, idx) {
+        var current = root.controller.selectedGids.slice()
+        var pos = current.indexOf(gid)
+        if (pos !== -1) {
+            current.splice(pos, 1)
+        } else {
+            current.push(gid)
+        }
+        root.anchorIndex = idx
+        root.controller.setSelectionList(current, gid)
+    }
+
+    function selectRangeRows(toIdx) {
+        var count = listView.count
+        if (count <= 0) return
+        var start = root.anchorIndex >= 0 ? root.anchorIndex : 0
+        var low = Math.min(start, toIdx)
+        var high = Math.max(start, toIdx)
+        var gids = []
+        for (var i = low; i <= high; i++) {
+            var mIdx = root.controller.downloadModel.index(i, 0)
+            var g = root.controller.downloadModel.data(mIdx, Qt.UserRole + 1) // GidRole
+            if (g) gids.push(g)
+        }
+        var primary = gids.length > 0 ? gids[gids.length - 1] : ""
+        root.controller.setSelectionList(gids, primary)
+    }
+
+    function selectAllRows() {
+        var count = listView.count
+        var gids = []
+        for (var i = 0; i < count; i++) {
+            var mIdx = root.controller.downloadModel.index(i, 0)
+            var g = root.controller.downloadModel.data(mIdx, Qt.UserRole + 1)
+            if (g) gids.push(g)
+        }
+        var primary = gids.length > 0 ? gids[0] : ""
+        root.controller.setSelectionList(gids, primary)
+    }
+
+    Shortcut {
+        sequence: "Ctrl+A"
+        onActivated: root.selectAllRows()
+    }
+
+    Shortcut {
+        sequence: "Delete"
+        onActivated: {
+            if (root.controller.selectedGid !== "") {
+                root.controller.removeDownload(root.controller.selectedGid, "")
+            }
+        }
+    }
+
+    component DarkMenuItem: MenuItem {
+        id: menuItemControl
+        property color textColor: Theme.textPrimary
+        implicitWidth: 230
+        implicitHeight: visible ? 30 : 0
+        height: visible ? 30 : 0
+
+        contentItem: Text {
+            text: menuItemControl.text
+            font.pixelSize: Theme.fontSizeNormal
+            color: menuItemControl.enabled ? menuItemControl.textColor : Theme.textMuted
+            verticalAlignment: Text.AlignVCenter
+            leftPadding: 10
+            elide: Text.ElideRight
+        }
+
+        background: Rectangle {
+            color: menuItemControl.highlighted ? Theme.rowSelected : "transparent"
+            radius: Theme.radiusSmall
+        }
+    }
+
+    component DarkMenuSeparator: MenuSeparator {
+        id: sepControl
+        implicitHeight: visible ? 9 : 0
+        height: visible ? 9 : 0
+        padding: 0
+        contentItem: Rectangle {
+            implicitWidth: 210
+            implicitHeight: 1
+            color: Theme.borderSubtle
+        }
+        background: Item {}
+    }
+
+    // Smart Dark-Mode Right-Click Context Menu
+    Menu {
+        id: rowContextMenu
+        width: 240
+        padding: 5
+
+        readonly property var caps: root.controller.selectionCapabilities || ({})
+
+        background: Rectangle {
+            color: Theme.bgPanel
+            border.color: Theme.borderFocus
+            border.width: 1
+            radius: Theme.radiusMedium
+        }
+
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canResume === true
+            text: root.controller.selectedGids.length > 1
+                  ? "▶ Resume Selected (" + root.controller.selectedGids.length + ")"
+                  : "▶ Resume / Start"
+            textColor: Theme.statusActive
+            onTriggered: root.controller.resumeDownload(root.controller.selectedGid)
+        }
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canPause === true
+            text: root.controller.selectedGids.length > 1
+                  ? "⏸ Pause Selected (" + root.controller.selectedGids.length + ")"
+                  : "⏸ Pause"
+            textColor: Theme.statusPaused
+            onTriggered: root.controller.pauseDownload(root.controller.selectedGid)
+        }
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canRetry === true
+            text: "↻ Retry Failed / Missing"
+            textColor: Theme.accentBlue
+            onTriggered: root.controller.retryDownload(root.controller.selectedGid)
+        }
+
+        DarkMenuSeparator {
+            visible: (rowContextMenu.caps.canResume || rowContextMenu.caps.canPause || rowContextMenu.caps.canRetry) && rowContextMenu.caps.canPrioritize
+        }
+
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canPrioritize === true
+            text: "⬆ Priority: High (Move to Top)"
+            onTriggered: root.controller.setDownloadPriority(root.controller.selectedGid, "High")
+        }
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canPrioritize === true
+            text: "▬ Priority: Normal"
+            onTriggered: root.controller.setDownloadPriority(root.controller.selectedGid, "Normal")
+        }
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canPrioritize === true
+            text: "⬇ Priority: Low (Move to Bottom)"
+            onTriggered: root.controller.setDownloadPriority(root.controller.selectedGid, "Low")
+        }
+
+        DarkMenuSeparator {
+            visible: rowContextMenu.caps.canResume || rowContextMenu.caps.canPause || rowContextMenu.caps.canRetry || rowContextMenu.caps.canPrioritize
+        }
+
+        DarkMenuItem {
+            text: "📂 Open Destination Folder"
+            onTriggered: {
+                var dir = root.controller.selectedItem.saveDir || root.controller.defaultSaveDir
+                root.controller.openFolder(dir)
+            }
+        }
+        DarkMenuItem {
+            visible: rowContextMenu.caps.canChangeDir === true
+            text: "📁 Change Save Directory..."
+            onTriggered: {
+                var cur = root.controller.selectedItem.saveDir || root.controller.defaultSaveDir
+                var picked = root.controller.browseFolder(cur)
+                if (picked !== "") {
+                    root.controller.changeDownloadPath(root.controller.selectedGid, picked)
+                }
+            }
+        }
+        DarkMenuItem {
+            visible: rowContextMenu.caps.hasSourceUri === true
+            text: "📋 Copy Source Link"
+            onTriggered: root.controller.copyLogsToClipboard(root.controller.selectedItem.sourceUri || "")
+        }
+
+        DarkMenuSeparator {}
+
+        DarkMenuItem {
+            text: "Select All (Ctrl+A)"
+            onTriggered: root.selectAllRows()
+        }
+        DarkMenuItem {
+            text: root.controller.selectedGids.length > 1
+                  ? "✕ Remove Selected (" + root.controller.selectedGids.length + ")"
+                  : "✕ Remove from List"
+            textColor: Theme.statusError
+            onTriggered: root.controller.removeDownload(root.controller.selectedGid, root.controller.selectedItem.status || "")
+        }
+    }
 
     // Dynamic proportional column ratios (Total = 1.0)
     readonly property real colNameRatio: 0.28
@@ -5121,7 +6230,7 @@ Rectangle {
                 width: listView.width
                 height: Theme.rowHeight
 
-                readonly property bool isSelected: root.controller.selectedGid === model.gid
+                readonly property bool isSelected: root.isGidSelected(model.gid)
 
                 color: {
                     if (isSelected) return Theme.rowSelected
@@ -5130,13 +6239,71 @@ Rectangle {
                     return (index % 2 === 0) ? Theme.rowEven : Theme.rowOdd
                 }
 
+                Timer {
+                    id: hoverNameTimer
+                    interval: 1000
+                    repeat: false
+                    onTriggered: {
+                        if (rowMouse.containsMouse) {
+                            fullNameTooltip.visible = true
+                        }
+                    }
+                }
+
+                ToolTip {
+                    id: fullNameTooltip
+                    parent: rowDelegate
+                    x: Math.min(rowMouse.mouseX + 14, rowDelegate.width - implicitWidth - 10)
+                    y: rowMouse.mouseY + 18
+                    visible: false
+                    text: model.name || ""
+                    delay: 0
+                    timeout: 6000
+
+                    contentItem: Text {
+                        text: fullNameTooltip.text
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeNormal
+                    }
+
+                    background: Rectangle {
+                        color: Theme.bgHeader
+                        border.color: Theme.borderFocus
+                        border.width: 1
+                        radius: Theme.radiusSmall
+                    }
+                }
+
                 MouseArea {
                     id: rowMouse
                     anchors.fill: parent
                     hoverEnabled: true
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onEntered: hoverNameTimer.restart()
+                    onExited: {
+                        hoverNameTimer.stop()
+                        fullNameTooltip.visible = false
+                    }
+                    onPositionChanged: {
+                        fullNameTooltip.visible = false
+                        hoverNameTimer.restart()
+                    }
                     onClicked: function(mouse) {
-                        root.controller.selectDownload(model.gid)
+                        root.forceActiveFocus()
+                        if (mouse.button === Qt.RightButton) {
+                            if (!root.isGidSelected(model.gid)) {
+                                root.selectSingleRow(model.gid, index)
+                            }
+                            rowContextMenu.popup()
+                            return
+                        }
+                        if (mouse.modifiers & Qt.ShiftModifier) {
+                            root.selectRangeRows(index)
+                        } else if (mouse.modifiers & Qt.ControlModifier) {
+                            root.toggleRowSelection(model.gid, index)
+                        } else {
+                            root.selectSingleRow(model.gid, index)
+                        }
                     }
                     onDoubleClicked: {
                         if (model.isPackage) {
@@ -5178,23 +6345,65 @@ Rectangle {
                                 }
                             }
 
+                            // Status Dot (Purple #C678DD for Finished!)
                             Rectangle {
                                 visible: !model.isPackage
-                                width: 8
-                                height: 8
-                                radius: 4
+                                width: 9
+                                height: 9
+                                radius: 5
                                 color: {
                                     if (model.status === "active") return Theme.statusActive
-                                    if (model.status === "complete") return Theme.statusFinished
+                                    if (model.status === "complete") return Theme.statusFinished // Purple
                                     if (model.status === "paused") return Theme.statusPaused
                                     if (model.status === "error" || model.status === "missing") return Theme.statusError
                                     return Theme.textMuted
                                 }
                             }
 
+                            // Website Favicon Badge
+                            Rectangle {
+                                visible: !model.isPackage
+                                width: 16
+                                height: 16
+                                radius: 3
+                                color: Theme.bgInput
+                                border.color: Theme.borderSubtle
+                                border.width: 1
+                                clip: true
+
+                                Image {
+                                    id: siteFavicon
+                                    anchors.fill: parent
+                                    anchors.margins: 1
+                                    source: (!model.isPackage && model.faviconUrl) ? model.faviconUrl : ""
+                                    fillMode: Image.PreserveAspectFit
+                                    asynchronous: true
+                                    cache: true
+                                    visible: status === Image.Ready
+                                }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: siteFavicon.status !== Image.Ready
+                                    text: (model.domain && model.domain.length > 0) ? model.domain.charAt(0).toUpperCase() : "🌐"
+                                    color: Theme.accentBlue
+                                    font.pixelSize: 9
+                                    font.bold: true
+                                }
+                            }
+
+                            // Optional Item Number (Toggled via TopBar '# Num' button)
+                            Text {
+                                visible: !model.isPackage && root.controller.showRowNumbers && model.itemNumber > 0
+                                text: model.itemNumber + "."
+                                color: Theme.accentBlue
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.bold: true
+                            }
+
                             Text {
                                 Layout.fillWidth: true
-                                text: model.name
+                                text: (model.priority === "High" ? "⬆ " : (model.priority === "Low" ? "⬇ " : "")) + model.name
                                 color: model.isPackage ? "#FFD580" : Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
                                 font.bold: model.isPackage
@@ -5244,13 +6453,14 @@ Rectangle {
                             anchors.right: parent.right
                             text: model.statusDisplay
                             color: {
-                                if (model.status === "complete") return Theme.statusFinished
+                                if (model.status === "complete") return Theme.statusFinished // Purple
                                 if (model.status === "error" || model.status === "missing") return Theme.statusError
                                 if (model.status === "paused") return Theme.statusPaused
                                 if (model.status === "active") return Theme.statusActive
                                 return Theme.textSecondary
                             }
                             font.pixelSize: Theme.fontSizeNormal
+                            font.bold: model.status === "complete"
                             elide: Text.ElideRight
                         }
                     }
@@ -5319,7 +6529,9 @@ Rectangle {
                             Rectangle {
                                 width: parent.width * (model.progress / 100.0)
                                 height: parent.height
-                                color: model.status === "error" ? Theme.statusError : Theme.progressFill
+                                color: model.status === "error"
+                                       ? Theme.statusError
+                                       : (model.status === "complete" ? "#7E57C2" : Theme.progressFill)
                             }
 
                             Text {
@@ -5368,17 +6580,20 @@ Rectangle {
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import ".."
 
-Popup {
+Window {
     id: root
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    anchors.centerIn: Overlay.overlay
-    width: Math.min(680, parent ? parent.width - 40 : 680)
-    height: 540
-    padding: 0
+    title: "DMAN - Settings & Configuration"
+    width: 820
+    height: 580
+    minimumWidth: 720
+    minimumHeight: 500
+    flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+    modality: Qt.NonModal
+    visible: false
+    color: Theme.bgPrimary
 
     required property var controller
 
@@ -5409,17 +6624,26 @@ Popup {
         clipAutoPopupCheck.checked = root.controller.clipboardAutoPopup
 
         notifCompleteCheck.checked = root.controller.notifyOnComplete
+        notifPackageOnlyCheck.checked = root.controller.notifyPackageOnly
         notifErrorCheck.checked = root.controller.notifyOnError
         notifClipCheck.checked = root.controller.notifyOnClipboard
         notifTitleField.text = root.controller.notifyTitleTemplate
         notifCompleteField.text = root.controller.notifyCompleteTemplate
+        notifPackageField.text = root.controller.notifyPackageTemplate
         notifErrorField.text = root.controller.notifyErrorTemplate
         notifClipField.text = root.controller.notifyClipboardTemplate
 
         root.pinCodeDisplay = ""
         root.pinUrlDisplay = ""
         root.controller.refreshDebugLogs()
-        root.open()
+        root.show()
+        root.raise()
+        root.requestActivate()
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        onActivated: root.close()
     }
 
     Connections {
@@ -5436,276 +6660,620 @@ Popup {
         }
     }
 
-    background: Rectangle {
-        color: Theme.bgPanel
+    component SectionCard: Rectangle {
+        default property alias cardContent: innerCol.data
+        property string cardTitle: ""
+        property color titleColor: Theme.accentBlue
+        Layout.fillWidth: true
+        implicitHeight: innerCol.implicitHeight + 28
+        color: Theme.bgSecondary
         radius: Theme.radiusMedium
-        border.color: Theme.borderFocus
+        border.color: Theme.borderSubtle
         border.width: 1
-    }
 
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: 16
-        spacing: 10
-
-        // Dialog Header + Tab Selector
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
+        ColumnLayout {
+            id: innerCol
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 10
 
             Text {
-                text: "DMAN Preferences"
-                color: Theme.textPrimary
-                font.pixelSize: 15
+                visible: cardTitle !== ""
+                text: cardTitle
+                color: titleColor
+                font.pixelSize: 13
                 font.bold: true
             }
+        }
+    }
 
-            Item { Layout.fillWidth: true }
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
 
-            Repeater {
-                model: [
-                    "1. Engine & AllDebrid",
-                    "2. System & Watchdog",
-                    "3. Notifications",
-                    "4. Logs & Debugging"
-                ]
+        // LEFT NAVIGATION SIDEBAR
+        Rectangle {
+            Layout.preferredWidth: 210
+            Layout.fillHeight: true
+            color: Theme.bgSecondary
+            border.color: Theme.borderSubtle
+            border.width: 1
 
-                delegate: Rectangle {
-                    implicitWidth: tabLbl.implicitWidth + 18
-                    implicitHeight: 28
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 6
+
+                Text {
+                    text: "⚙ Preferences"
+                    color: Theme.textPrimary
+                    font.pixelSize: 16
+                    font.bold: true
+                    Layout.bottomMargin: 10
+                }
+
+                Repeater {
+                    model: [
+                        { title: "Engine & Storage", icon: "🚀" },
+                        { title: "AllDebrid Cloud", icon: "⚡" },
+                        { title: "System & Watchdog", icon: "🖥" },
+                        { title: "Notifications", icon: "🔔" },
+                        { title: "Logs & Debugging", icon: "🐞" }
+                    ]
+
+                    delegate: Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 36
+                        radius: Theme.radiusSmall
+                        readonly property bool isCurrent: root.currentTab === index
+                        color: isCurrent ? Theme.rowSelected : (navMouse.containsMouse ? Theme.rowHover : "transparent")
+                        border.color: isCurrent ? Theme.borderFocus : "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 10
+                            spacing: 10
+
+                            Text {
+                                text: modelData.icon
+                                font.pixelSize: 14
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.title
+                                color: isCurrent ? "#FFFFFF" : Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: isCurrent
+                            }
+                        }
+
+                        MouseArea {
+                            id: navMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.currentTab = index
+                        }
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
+
+                // App Lifecycle Controls at bottom of sidebar
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 30
                     radius: Theme.radiusSmall
-                    color: root.currentTab === index ? Theme.rowSelected : Theme.bgHeader
-                    border.color: root.currentTab === index ? Theme.borderFocus : Theme.borderSubtle
+                    color: Theme.bgHeader
+                    border.color: Theme.statusPaused
 
                     Text {
-                        id: tabLbl
                         anchors.centerIn: parent
-                        text: modelData
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: root.currentTab === index
+                        text: "↻ Restart DMAN"
+                        color: Theme.statusPaused
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
                     }
 
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.currentTab = index
+                        onClicked: root.controller.restartApp()
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 30
+                    radius: Theme.radiusSmall
+                    color: Theme.bgHeader
+                    border.color: Theme.statusError
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "⏻ Quit & Shutdown"
+                        color: Theme.statusError
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.controller.shutdownApp()
                     }
                 }
             }
         }
 
-        // TAB 0: Engine & AllDebrid
+        // RIGHT CONTENT AREA
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            visible: root.currentTab === 0
-            spacing: 10
+            spacing: 0
 
-            Rectangle {
+            // Content Pages Container
+            Item {
                 Layout.fillWidth: true
-                implicitHeight: dirCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
+                Layout.fillHeight: true
+                Layout.margins: 18
 
+                // PAGE 0: Engine & Storage
                 ColumnLayout {
-                    id: dirCol
                     anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 6
+                    visible: root.currentTab === 0
+                    spacing: 14
 
-                    Text {
-                        text: "Default Download Directory"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
+                    SectionCard {
+                        cardTitle: "Default Download Storage"
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        TextField {
-                            id: defaultDirField
+                        RowLayout {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            selectByMouse: true
-                            leftPadding: 8
-                            rightPadding: 8
-                            background: Rectangle {
-                                color: Theme.bgInput
-                                radius: Theme.radiusSmall
-                                border.color: Theme.borderSubtle
-                            }
-                        }
+                            spacing: 8
 
-                        Rectangle {
-                            implicitWidth: 85
-                            implicitHeight: 28
-                            radius: Theme.radiusSmall
-                            color: Theme.bgHeader
-                            border.color: Theme.borderSubtle
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "Browse..."
+                            TextField {
+                                id: defaultDirField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 32
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
+                                selectByMouse: true
+                                leftPadding: 10
+                                background: Rectangle {
+                                    color: Theme.bgInput
+                                    radius: Theme.radiusSmall
+                                    border.color: defaultDirField.activeFocus ? Theme.borderFocus : Theme.borderSubtle
+                                }
                             }
 
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    var folder = root.controller.browseFolder(defaultDirField.text)
-                                    if (folder !== "") defaultDirField.text = folder
+                            Rectangle {
+                                implicitWidth: 95
+                                implicitHeight: 32
+                                radius: Theme.radiusSmall
+                                color: Theme.bgHeader
+                                border.color: Theme.borderSubtle
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "Browse..."
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var folder = root.controller.browseFolder(defaultDirField.text)
+                                        if (folder !== "") defaultDirField.text = folder
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
 
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: ariaCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
+                    SectionCard {
+                        cardTitle: "aria2 High-Speed Engine Tuning (Applied Live)"
 
-                ColumnLayout {
-                    id: ariaCol
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: 2
+                            rowSpacing: 12
+                            columnSpacing: 20
 
-                    Text {
-                        text: "aria2 Engine Tuning (Live Applied & Resumable Sessions)"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
+                            Text { text: "Max Concurrent Downloads:"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: concurrentSpin; from: 1; to: 32; value: 5; editable: true }
 
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 4
-                        rowSpacing: 8
-                        columnSpacing: 12
+                            Text { text: "Connections / Split per File (1 - 64):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: splitSpin; from: 1; to: 64; value: 16; editable: true }
 
-                        Text { text: "Max Concurrent Files:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: concurrentSpin; from: 1; to: 32; value: 5; editable: true }
+                            Text { text: "Max Connections per Server (1 - 16):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: connPerServerSpin; from: 1; to: 16; value: 16; editable: true }
 
-                        Text { text: "Segments per File (Split):"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: splitSpin; from: 1; to: 64; value: 16; editable: true }
+                            Text { text: "Minimum Split Size (e.g. 1M, 5M):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: minSplitField
+                                Layout.preferredWidth: 120
+                                Layout.preferredHeight: 28
+                                text: "1M"
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
 
-                        Text { text: "Max Conn. per Server:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: connPerServerSpin; from: 1; to: 16; value: 16; editable: true }
-
-                        Text { text: "Min Split Size (1M, 5M):"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: minSplitField
-                            Layout.preferredWidth: 100
-                            Layout.preferredHeight: 26
-                            text: "1M"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            Text { text: "Global Speed Limit (MB/s, 0 = Unlimited):"; color: Theme.textPrimary; font.pixelSize: Theme.fontSizeNormal }
+                            SpinBox { id: speedLimitSpin; from: 0; to: 2000; value: 0; editable: true }
                         }
-
-                        Text { text: "Speed Limit (MB/s, 0=Unlim):"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        SpinBox { id: speedLimitSpin; from: 0; to: 2000; value: 0; editable: true }
                     }
+
+                    Item { Layout.fillHeight: true }
                 }
-            }
 
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
+                // PAGE 1: AllDebrid Cloud
                 ColumnLayout {
                     anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
+                    visible: root.currentTab === 1
+                    spacing: 14
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Text {
-                            text: "AllDebrid API v4 / v4.1 (Supports Links, Magnets & .torrent Files)"
-                            color: Theme.statusActive
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                        }
-                        Item { Layout.fillWidth: true }
-                        Text {
-                            text: "Status: " + root.controller.alldebridStatusText
-                            color: root.controller.alldebridIsPremium ? Theme.statusActive : Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.bold: true
-                        }
-                    }
+                    SectionCard {
+                        cardTitle: "AllDebrid Account & Unrestricting"
+                        titleColor: Theme.statusActive
 
-                    RowLayout {
-                        spacing: 16
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Account Status: " + root.controller.alldebridStatusText
+                                color: root.controller.alldebridIsPremium ? Theme.statusActive : Theme.textSecondary
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
                         CheckBox {
                             id: adEnabledCheck
-                            text: "Enable AllDebrid Unrestricting"
+                            text: "Enable AllDebrid Link Unrestricting & Fast-Track CDN"
                             contentItem: Text {
                                 text: adEnabledCheck.text
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: adEnabledCheck.indicator.width + 6
+                                leftPadding: adEnabledCheck.indicator.width + 8
                                 verticalAlignment: Text.AlignVCenter
                             }
                         }
+
                         CheckBox {
                             id: adCloudMagnetCheck
-                            text: "Convert Magnets & .torrent via Cloud"
+                            text: "Convert Magnets & .torrent files via AllDebrid Cloud"
                             contentItem: Text {
                                 text: adCloudMagnetCheck.text
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: adCloudMagnetCheck.indicator.width + 6
+                                leftPadding: adCloudMagnetCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text { text: "Bearer API Key:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+
+                            TextField {
+                                id: adApiKeyField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 32
+                                placeholderText: "Paste API Key or use 'Login via PIN'"
+                                placeholderTextColor: Theme.textMuted
+                                echoMode: TextInput.Password
+                                color: Theme.textPrimary
+                                leftPadding: 10
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Rectangle {
+                                implicitWidth: 125
+                                implicitHeight: 32
+                                radius: Theme.radiusSmall
+                                color: Theme.bgHeader
+                                border.color: Theme.borderFocus
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "🔑 Login via PIN"
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: true
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.controller.startAllDebridPinAuth()
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: root.pinCodeDisplay !== ""
+                            text: "PIN Code: [" + root.pinCodeDisplay + "] — Opened in browser: " + root.pinUrlDisplay
+                            color: Theme.statusPaused
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.bold: true
+                        }
+                    }
+
+                    Item { Layout.fillHeight: true }
+                }
+
+                // PAGE 2: System & Watchdog
+                ColumnLayout {
+                    anchors.fill: parent
+                    visible: root.currentTab === 2
+                    spacing: 14
+
+                    SectionCard {
+                        cardTitle: "Desktop Integration & Power Management"
+
+                        CheckBox {
+                            id: startSysCheck
+                            text: "Start DMAN automatically on system login"
+                            contentItem: Text {
+                                text: startSysCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: startSysCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        CheckBox {
+                            id: startMinCheck
+                            text: "Start minimized in System Tray"
+                            contentItem: Text {
+                                text: startMinCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: startMinCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        CheckBox {
+                            id: closeTrayCheck
+                            text: "Closing main window hides DMAN to System Tray (keeps downloads active)"
+                            contentItem: Text {
+                                text: closeTrayCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: closeTrayCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        RowLayout {
+                            spacing: 8
+                            Text { text: "When all downloads finish:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+
+                            Repeater {
+                                model: [
+                                    { label: "Do Nothing", value: "nothing" },
+                                    { label: "Sleep OS", value: "sleep" },
+                                    { label: "Shutdown OS", value: "shutdown" },
+                                    { label: "Quit App", value: "quit" }
+                                ]
+                                delegate: Rectangle {
+                                    implicitWidth: pwrTxt.implicitWidth + 16
+                                    implicitHeight: 28
+                                    radius: Theme.radiusSmall
+                                    color: root.selectedPostAction === modelData.value ? Theme.rowSelected : Theme.bgHeader
+                                    border.color: root.selectedPostAction === modelData.value ? Theme.borderFocus : Theme.borderSubtle
+
+                                    Text {
+                                        id: pwrTxt
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.selectedPostAction = modelData.value
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        cardTitle: "Clipboard Watchdog"
+                        titleColor: Theme.statusActive
+
+                        RowLayout {
+                            spacing: 8
+                            Text { text: "Capture Mode:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+
+                            Repeater {
+                                model: [
+                                    { label: "Disabled", value: "disabled" },
+                                    { label: "All Download Links", value: "all" },
+                                    { label: "AllDebrid Domains Only", value: "alldebrid_only" }
+                                ]
+                                delegate: Rectangle {
+                                    implicitWidth: cmTxt.implicitWidth + 16
+                                    implicitHeight: 28
+                                    radius: Theme.radiusSmall
+                                    color: root.selectedClipboardMode === modelData.value ? Theme.rowSelected : Theme.bgHeader
+                                    border.color: root.selectedClipboardMode === modelData.value ? Theme.borderFocus : Theme.borderSubtle
+
+                                    Text {
+                                        id: cmTxt
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.selectedClipboardMode = modelData.value
+                                    }
+                                }
+                            }
+                        }
+
+                        CheckBox {
+                            id: clipAutoPopupCheck
+                            text: "Pop up 'Add Links' window automatically when links are copied"
+                            contentItem: Text {
+                                text: clipAutoPopupCheck.text
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                leftPadding: clipAutoPopupCheck.indicator.width + 8
                                 verticalAlignment: Text.AlignVCenter
                             }
                         }
                     }
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
+                    Item { Layout.fillHeight: true }
+                }
 
-                        Text { text: "API Key:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                // PAGE 3: Notifications
+                ColumnLayout {
+                    anchors.fill: parent
+                    visible: root.currentTab === 3
+                    spacing: 14
 
-                        TextField {
-                            id: adApiKeyField
+                    SectionCard {
+                        cardTitle: "Notification Triggers & Package Grouping"
+
+                        RowLayout {
+                            spacing: 18
+                            CheckBox {
+                                id: notifCompleteCheck
+                                text: "Notify on Completion"
+                                contentItem: Text {
+                                    text: notifCompleteCheck.text
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    leftPadding: notifCompleteCheck.indicator.width + 6
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                            CheckBox {
+                                id: notifErrorCheck
+                                text: "Notify on Error"
+                                contentItem: Text {
+                                    text: notifErrorCheck.text
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    leftPadding: notifErrorCheck.indicator.width + 6
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                            CheckBox {
+                                id: notifClipCheck
+                                text: "Notify on Clipboard Capture"
+                                contentItem: Text {
+                                    text: notifClipCheck.text
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    leftPadding: notifClipCheck.indicator.width + 6
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                        }
+
+                        CheckBox {
+                            id: notifPackageOnlyCheck
+                            text: "Notify ONCE per parent Package/Folder when ALL files inside it finish (Prevents spam)"
+                            contentItem: Text {
+                                text: notifPackageOnlyCheck.text
+                                color: Theme.statusFinished
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: true
+                                leftPadding: notifPackageOnlyCheck.indicator.width + 8
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        cardTitle: "Custom Notification Templates ({event}, {name}, {dir}, {count}, {error})"
+
+                        GridLayout {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            placeholderText: "Bearer API Key or click 'Login via PIN'"
-                            placeholderTextColor: Theme.textMuted
-                            echoMode: TextInput.Password
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            columns: 2
+                            rowSpacing: 8
+                            columnSpacing: 12
+
+                            Text { text: "Title Template:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifTitleField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Package Finished:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifPackageField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Single File Finished:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifCompleteField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Error Template:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifErrorField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
+
+                            Text { text: "Clipboard Template:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
+                            TextField {
+                                id: notifClipField
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                color: Theme.textPrimary
+                                leftPadding: 8
+                                background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
+                            }
                         }
 
                         Rectangle {
-                            implicitWidth: 115
-                            implicitHeight: 28
+                            implicitWidth: 165
+                            implicitHeight: 30
                             radius: Theme.radiusSmall
                             color: Theme.bgHeader
                             border.color: Theme.borderFocus
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "Login via PIN"
+                                text: "🔔 Send Test Notification"
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.bold: true
@@ -5714,597 +7282,209 @@ Popup {
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.controller.startAllDebridPinAuth()
+                                onClicked: root.controller.testCustomNotification()
                             }
-                        }
-                    }
-
-                    Text {
-                        visible: root.pinCodeDisplay !== ""
-                        text: "PIN: [" + root.pinCodeDisplay + "] — Approve in browser (" + root.pinUrlDisplay + ")"
-                        color: Theme.statusPaused
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                    }
-                }
-            }
-        }
-
-        // TAB 1: System Integration, Tray, Power & Clipboard Watchdog
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: root.currentTab === 1
-            spacing: 10
-
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: sysCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                ColumnLayout {
-                    id: sysCol
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
-
-                    Text {
-                        text: "Desktop & System Tray Integration (Hyprland Wayland & Windows)"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-
-                    CheckBox {
-                        id: startSysCheck
-                        text: "Start DMAN automatically with system login"
-                        contentItem: Text {
-                            text: startSysCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: startSysCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    CheckBox {
-                        id: startMinCheck
-                        text: "Start minimized in System Tray"
-                        contentItem: Text {
-                            text: startMinCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: startMinCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    CheckBox {
-                        id: closeTrayCheck
-                        text: "Closing the window places DMAN in System Tray (Keep downloads running)"
-                        contentItem: Text {
-                            text: closeTrayCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: closeTrayCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    RowLayout {
-                        spacing: 10
-                        Text {
-                            text: "When all downloads finish:"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
-                        Repeater {
-                            model: [
-                                { label: "Do Nothing", value: "nothing" },
-                                { label: "Sleep System", value: "sleep" },
-                                { label: "Shutdown System", value: "shutdown" },
-                                { label: "Quit DMAN", value: "quit" }
-                            ]
-
-                            delegate: Rectangle {
-                                implicitWidth: pwrTxt.implicitWidth + 14
-                                implicitHeight: 24
-                                radius: Theme.radiusSmall
-                                color: root.selectedPostAction === modelData.value ? Theme.rowSelected : Theme.bgHeader
-                                border.color: root.selectedPostAction === modelData.value ? Theme.borderFocus : Theme.borderSubtle
-
-                                Text {
-                                    id: pwrTxt
-                                    anchors.centerIn: parent
-                                    text: modelData.label
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.selectedPostAction = modelData.value
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: clipCol.implicitHeight + 16
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                ColumnLayout {
-                    id: clipCol
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 8
-
-                    Text {
-                        text: "Clipboard Watchdog (Auto-Capture Copied Links)"
-                        color: Theme.statusActive
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-
-                    RowLayout {
-                        spacing: 8
-                        Text {
-                            text: "Watchdog Mode:"
-                            color: Theme.textSecondary
-                            font.pixelSize: Theme.fontSizeNormal
-                        }
-
-                        Repeater {
-                            model: [
-                                { label: "Disabled", value: "disabled" },
-                                { label: "All Download Links", value: "all" },
-                                { label: "AllDebrid Supported Only", value: "alldebrid_only" }
-                            ]
-
-                            delegate: Rectangle {
-                                implicitWidth: cmTxt.implicitWidth + 14
-                                implicitHeight: 24
-                                radius: Theme.radiusSmall
-                                color: root.selectedClipboardMode === modelData.value ? Theme.rowSelected : Theme.bgHeader
-                                border.color: root.selectedClipboardMode === modelData.value ? Theme.borderFocus : Theme.borderSubtle
-
-                                Text {
-                                    id: cmTxt
-                                    anchors.centerIn: parent
-                                    text: modelData.label
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.selectedClipboardMode = modelData.value
-                                }
-                            }
-                        }
-                    }
-
-                    CheckBox {
-                        id: clipAutoPopupCheck
-                        text: "Automatically open 'Add Links' dialog when links are captured"
-                        contentItem: Text {
-                            text: clipAutoPopupCheck.text
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: clipAutoPopupCheck.indicator.width + 6
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-                }
-            }
-
-            // App Lifecycle Control Box
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 12
-                    spacing: 12
-
-                    Text {
-                        text: "Application Control (Saves aria2 session before exit):"
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeNormal
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Rectangle {
-                        implicitWidth: 120
-                        implicitHeight: 28
-                        radius: Theme.radiusSmall
-                        color: Theme.bgHeader
-                        border.color: Theme.statusPaused
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "↻ Restart App"
-                            color: Theme.statusPaused
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.controller.restartApp()
-                        }
-                    }
-
-                    Rectangle {
-                        implicitWidth: 130
-                        implicitHeight: 28
-                        radius: Theme.radiusSmall
-                        color: Theme.bgHeader
-                        border.color: Theme.statusError
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "⏻ Shutdown App"
-                            color: Theme.statusError
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.controller.shutdownApp()
-                        }
-                    }
-                }
-            }
-        }
-
-        // TAB 2: Notifications Customization
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: root.currentTab === 2
-            spacing: 10
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgSecondary
-                radius: Theme.radiusSmall
-                border.color: Theme.borderSubtle
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 10
-
-                    Text {
-                        text: "OS Notification Triggers & Custom Message Templates"
-                        color: Theme.accentBlue
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-
-                    RowLayout {
-                        spacing: 16
-                        CheckBox {
-                            id: notifCompleteCheck
-                            text: "On Download Complete"
-                            contentItem: Text {
-                                text: notifCompleteCheck.text
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: notifCompleteCheck.indicator.width + 6
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                        CheckBox {
-                            id: notifErrorCheck
-                            text: "On Download Error"
-                            contentItem: Text {
-                                text: notifErrorCheck.text
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: notifErrorCheck.indicator.width + 6
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                        CheckBox {
-                            id: notifClipCheck
-                            text: "On Clipboard Link Captured"
-                            contentItem: Text {
-                                text: notifClipCheck.text
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                leftPadding: notifClipCheck.indicator.width + 6
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "Available Variables: {event}, {name}, {dir}, {count}, {error}"
-                        color: Theme.textMuted
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 2
-                        rowSpacing: 8
-                        columnSpacing: 10
-
-                        Text { text: "Notification Title:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifTitleField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-
-                        Text { text: "Complete Body:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifCompleteField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-
-                        Text { text: "Error Body:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifErrorField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-
-                        Text { text: "Clipboard Body:"; color: Theme.textSecondary; font.pixelSize: Theme.fontSizeNormal }
-                        TextField {
-                            id: notifClipField
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 28
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            leftPadding: 8
-                            background: Rectangle { color: Theme.bgInput; radius: Theme.radiusSmall; border.color: Theme.borderSubtle }
-                        }
-                    }
-
-                    Rectangle {
-                        implicitWidth: 160
-                        implicitHeight: 28
-                        radius: Theme.radiusSmall
-                        color: Theme.bgHeader
-                        border.color: Theme.borderFocus
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "Send Test Notification"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeSmall
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.controller.testCustomNotification()
                         }
                     }
 
                     Item { Layout.fillHeight: true }
                 }
+
+                // PAGE 4: Logs & Debugging
+                ColumnLayout {
+                    anchors.fill: parent
+                    visible: root.currentTab === 4
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            text: "Live Application & API Debug Logs"
+                            color: Theme.accentBlue
+                            font.pixelSize: 14
+                            font.bold: true
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Rectangle {
+                            implicitWidth: 90
+                            implicitHeight: 28
+                            radius: Theme.radiusSmall
+                            color: Theme.bgHeader
+                            border.color: Theme.borderSubtle
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "↻ Refresh"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.controller.refreshDebugLogs()
+                            }
+                        }
+
+                        Rectangle {
+                            implicitWidth: 80
+                            implicitHeight: 28
+                            radius: Theme.radiusSmall
+                            color: Theme.bgHeader
+                            border.color: Theme.borderSubtle
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "Clear"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.controller.clearDebugLogs()
+                            }
+                        }
+
+                        Rectangle {
+                            implicitWidth: 125
+                            implicitHeight: 28
+                            radius: Theme.radiusSmall
+                            color: Theme.bgHeader
+                            border.color: Theme.borderFocus
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "📋 Copy All Logs"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.bold: true
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.controller.copyLogsToClipboard(debugLogArea.text)
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        color: Theme.bgInput
+                        radius: Theme.radiusSmall
+                        border.color: Theme.borderSubtle
+
+                        ScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 8
+
+                            TextArea {
+                                id: debugLogArea
+                                readOnly: true
+                                selectByMouse: true
+                                text: root.controller.debugLogsText
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: 11
+                                wrapMode: TextEdit.WrapAnywhere
+                                background: null
+                            }
+                        }
+                    }
+                }
             }
-        }
 
-        // TAB 3: Logs & Debugging
-        ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            visible: root.currentTab === 3
-            spacing: 8
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                Text {
-                    text: "Live Application & API Debug Logs"
-                    color: Theme.accentBlue
-                    font.pixelSize: Theme.fontSizeNormal
-                    font.bold: true
-                }
-
-                Item { Layout.fillWidth: true }
-
-                Rectangle {
-                    implicitWidth: 90
-                    implicitHeight: 26
-                    radius: Theme.radiusSmall
-                    color: Theme.bgHeader
-                    border.color: Theme.borderSubtle
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "↻ Refresh"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.controller.refreshDebugLogs()
-                    }
-                }
-
-                Rectangle {
-                    implicitWidth: 80
-                    implicitHeight: 26
-                    radius: Theme.radiusSmall
-                    color: Theme.bgHeader
-                    border.color: Theme.borderSubtle
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "Clear"
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.controller.clearDebugLogs()
-                    }
-                }
-
-                Rectangle {
-                    implicitWidth: 120
-                    implicitHeight: 26
-                    radius: Theme.radiusSmall
-                    color: Theme.bgHeader
-                    border.color: Theme.borderFocus
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "Copy All Logs"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.controller.copyLogsToClipboard(debugLogArea.text)
-                    }
-                }
-            }
-
+            // Bottom Save & Cancel Footer Bar
             Rectangle {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
-                color: Theme.bgInput
-                radius: Theme.radiusSmall
+                Layout.preferredHeight: 52
+                color: Theme.bgSecondary
                 border.color: Theme.borderSubtle
+                border.width: 1
 
-                ScrollView {
+                RowLayout {
                     anchors.fill: parent
-                    anchors.margins: 6
+                    anchors.leftMargin: 18
+                    anchors.rightMargin: 18
+                    spacing: 10
 
-                    TextArea {
-                        id: debugLogArea
-                        readOnly: true
-                        selectByMouse: true
-                        text: root.controller.debugLogsText
-                        color: Theme.textPrimary
-                        font.family: "monospace"
-                        font.pixelSize: 11
-                        wrapMode: TextEdit.WrapAnywhere
-                        background: null
+                    Item { Layout.fillWidth: true }
+
+                    Rectangle {
+                        implicitWidth: 95
+                        implicitHeight: 32
+                        radius: Theme.radiusSmall
+                        color: Theme.bgHeader
+                        border.color: Theme.borderSubtle
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Cancel"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeNormal
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.close()
+                        }
                     }
-                }
-            }
-        }
 
-        // Bottom Save & Cancel Row
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 10
+                    Rectangle {
+                        implicitWidth: 145
+                        implicitHeight: 32
+                        radius: Theme.radiusSmall
+                        color: Theme.accentBlue
 
-            Item { Layout.fillWidth: true }
+                        Text {
+                            anchors.centerIn: parent
+                            text: "Save & Apply"
+                            color: "#FFFFFF"
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.bold: true
+                        }
 
-            Rectangle {
-                implicitWidth: 90
-                implicitHeight: 30
-                radius: Theme.radiusSmall
-                color: Theme.bgHeader
-                border.color: Theme.borderSubtle
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "Cancel"
-                    color: Theme.textPrimary
-                    font.pixelSize: Theme.fontSizeNormal
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.close()
-                }
-            }
-
-            Rectangle {
-                implicitWidth: 135
-                implicitHeight: 30
-                radius: Theme.radiusSmall
-                color: Theme.accentBlue
-
-                Text {
-                    anchors.centerIn: parent
-                    text: "Save & Apply"
-                    color: "#FFFFFF"
-                    font.pixelSize: Theme.fontSizeNormal
-                    font.bold: true
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.controller.saveSettings({
-                            "defaultSaveDir": defaultDirField.text,
-                            "maxConcurrentDownloads": concurrentSpin.value,
-                            "splitCount": splitSpin.value,
-                            "maxConnectionPerServer": connPerServerSpin.value,
-                            "minSplitSize": minSplitField.text,
-                            "speedLimitMb": speedLimitSpin.value,
-                            "alldebridEnabled": adEnabledCheck.checked,
-                            "alldebridApiKey": adApiKeyField.text,
-                            "alldebridCloudMagnets": adCloudMagnetCheck.checked,
-                            "startWithSystem": startSysCheck.checked,
-                            "startMinimized": startMinCheck.checked,
-                            "closeToTray": closeTrayCheck.checked,
-                            "postDownloadAction": root.selectedPostAction,
-                            "clipboardMode": root.selectedClipboardMode,
-                            "clipboardAutoPopup": clipAutoPopupCheck.checked,
-                            "notifyOnComplete": notifCompleteCheck.checked,
-                            "notifyOnError": notifErrorCheck.checked,
-                            "notifyOnClipboard": notifClipCheck.checked,
-                            "notifyTitleTemplate": notifTitleField.text,
-                            "notifyCompleteTemplate": notifCompleteField.text,
-                            "notifyErrorTemplate": notifErrorField.text,
-                            "notifyClipboardTemplate": notifClipField.text
-                        })
-                        root.close()
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.controller.saveSettings({
+                                    "defaultSaveDir": defaultDirField.text,
+                                    "maxConcurrentDownloads": concurrentSpin.value,
+                                    "splitCount": splitSpin.value,
+                                    "maxConnectionPerServer": connPerServerSpin.value,
+                                    "minSplitSize": minSplitField.text,
+                                    "speedLimitMb": speedLimitSpin.value,
+                                    "alldebridEnabled": adEnabledCheck.checked,
+                                    "alldebridApiKey": adApiKeyField.text,
+                                    "alldebridCloudMagnets": adCloudMagnetCheck.checked,
+                                    "startWithSystem": startSysCheck.checked,
+                                    "startMinimized": startMinCheck.checked,
+                                    "closeToTray": closeTrayCheck.checked,
+                                    "postDownloadAction": root.selectedPostAction,
+                                    "clipboardMode": root.selectedClipboardMode,
+                                    "clipboardAutoPopup": clipAutoPopupCheck.checked,
+                                    "notifyOnComplete": notifCompleteCheck.checked,
+                                    "notifyPackageOnly": notifPackageOnlyCheck.checked,
+                                    "notifyOnError": notifErrorCheck.checked,
+                                    "notifyOnClipboard": notifClipCheck.checked,
+                                    "notifyTitleTemplate": notifTitleField.text,
+                                    "notifyCompleteTemplate": notifCompleteField.text,
+                                    "notifyPackageTemplate": notifPackageField.text,
+                                    "notifyErrorTemplate": notifErrorField.text,
+                                    "notifyClipboardTemplate": notifClipField.text
+                                })
+                                root.close()
+                            }
+                        }
                     }
                 }
             }
@@ -6466,6 +7646,50 @@ Rectangle {
             iconColor: Theme.accentBlue
             label: "Settings"
             onTriggered: root.openSettingsRequested()
+        }
+
+        Rectangle {
+            width: 1
+            height: 20
+            color: Theme.borderSubtle
+        }
+
+        // Toggle Item Numbers ("num" button, OFF by default)
+        Rectangle {
+            implicitWidth: numRow.implicitWidth + 16
+            implicitHeight: 26
+            radius: Theme.radiusSmall
+            color: root.controller.showRowNumbers ? Theme.rowSelected : (numMouse.containsMouse ? Theme.rowHover : Theme.bgHeader)
+            border.color: root.controller.showRowNumbers ? Theme.borderFocus : Theme.borderSubtle
+            border.width: 1
+
+            RowLayout {
+                id: numRow
+                anchors.centerIn: parent
+                spacing: 4
+
+                Text {
+                    text: "#"
+                    color: root.controller.showRowNumbers ? Theme.statusActive : Theme.textMuted
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: true
+                }
+
+                Text {
+                    text: "Num"
+                    color: root.controller.showRowNumbers ? Theme.textPrimary : Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: root.controller.showRowNumbers
+                }
+            }
+
+            MouseArea {
+                id: numMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.controller.toggleShowRowNumbers()
+            }
         }
 
         Item {
