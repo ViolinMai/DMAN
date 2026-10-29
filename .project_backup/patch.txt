@@ -1,425 +1,5 @@
-### EDIT: backend/remote_server.py
+### EDIT: index.html
 <<< FIND
-                if route == "/api/action":
-                    action = str(body.get("action", ""))
-                    gid = str(body.get("gid", ""))
-                    res = outer._action(action, gid)
-                    self._send_json(200, res)
-                    return
-
-                self._send_json(404, {"status": "error", "message": "Unknown POST endpoint"})
-===
-                if route == "/api/action":
-                    action = str(body.get("action", ""))
-                    gid = str(body.get("gid", ""))
-                    res = outer._action(action, gid)
-                    self._send_json(200, res)
-                    return
-
-                if route == "/api/fs/list":
-                    sub = str(body.get("subpath", "")).strip().strip("/\\")
-                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
-                    target = (base / sub).resolve()
-                    if not str(target).startswith(str(base.resolve())):
-                        self._send_json(403, {"status": "error", "message": "Access denied"})
-                        return
-                    items = []
-                    if target.exists() and target.is_dir():
-                        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                            items.append({
-                                "name": p.name,
-                                "isDir": p.is_dir(),
-                                "size": format_bytes(p.stat().st_size) if p.is_file() else "",
-                                "sizeBytes": p.stat().st_size if p.is_file() else 0,
-                                "modified": int(p.stat().st_mtime)
-                            })
-                    self._send_json(200, {"status": "ok", "currentPath": sub, "items": items})
-                    return
-
-                if route == "/api/fs/mkdir":
-                    sub = str(body.get("subpath", "")).strip().strip("/\\")
-                    name = str(body.get("name", "")).strip().replace("/", "").replace("\\", "")
-                    if not name:
-                        self._send_json(400, {"status": "error", "message": "Folder name required"})
-                        return
-                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
-                    target = (base / sub / name).resolve()
-                    if not str(target).startswith(str(base.resolve())):
-                        self._send_json(403, {"status": "error", "message": "Access denied"})
-                        return
-                    target.mkdir(parents=True, exist_ok=True)
-                    self._send_json(200, {"status": "ok"})
-                    return
-
-                if route == "/api/fs/rename":
-                    sub = str(body.get("subpath", "")).strip().strip("/\\")
-                    old_name = str(body.get("oldName", "")).strip().replace("/", "").replace("\\", "")
-                    new_name = str(body.get("newName", "")).strip().replace("/", "").replace("\\", "")
-                    if not old_name or not new_name:
-                        self._send_json(400, {"status": "error", "message": "Invalid names"})
-                        return
-                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
-                    src = (base / sub / old_name).resolve()
-                    dst = (base / sub / new_name).resolve()
-                    if not str(src).startswith(str(base.resolve())) or not str(dst).startswith(str(base.resolve())):
-                        self._send_json(403, {"status": "error", "message": "Access denied"})
-                        return
-                    if src.exists() and not dst.exists():
-                        src.rename(dst)
-                        self._send_json(200, {"status": "ok"})
-                    else:
-                        self._send_json(400, {"status": "error", "message": "Rename failed or target exists"})
-                    return
-
-                if route == "/api/fs/delete":
-                    sub = str(body.get("subpath", "")).strip().strip("/\\")
-                    name = str(body.get("name", "")).strip().replace("/", "").replace("\\", "")
-                    base = Path(outer._get_state().get("defaultSaveDir", Path.home()))
-                    target = (base / sub / name).resolve()
-                    if not str(target).startswith(str(base.resolve())):
-                        self._send_json(403, {"status": "error", "message": "Access denied"})
-                        return
-                    if target.is_dir():
-                        self._send_json(400, {"status": "error", "message": "Folder deletion is prohibited"})
-                        return
-                    if target.is_file():
-                        try:
-                            target.unlink()
-                            self._send_json(200, {"status": "ok"})
-                        except Exception as e:
-                            self._send_json(500, {"status": "error", "message": str(e)})
-                        return
-                    self._send_json(404, {"status": "error", "message": "File not found"})
-                    return
-
-                self._send_json(404, {"status": "error", "message": "Unknown POST endpoint"})
->>>
-### END
-
-### FILE: index.html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>DMAN Web Remote</title>
-
-  <!-- iOS Safari Web App Meta Tags -->
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="DMAN Remote">
-  <meta name="theme-color" content="#181A1D">
-
-  <style>
-    :root {
-      --bg-primary: #181A1D;
-      --bg-secondary: #202327;
-      --bg-panel: #26292E;
-      --bg-header: #2D3137;
-      --bg-input: #141619;
-      --text-main: #ECEFF4;
-      --text-muted: #A5B0C0;
-      --border-subtle: #343942;
-      --accent-blue: #5B9BD5;
-      --status-active: #6CC644;
-      --status-paused: #E5C07B;
-      --status-error: #E06C75;
-      --status-finished: #C678DD;
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      -webkit-tap-highlight-color: transparent;
-    }
-
-    body {
-      background-color: var(--bg-primary);
-      color: var(--text-main);
-      display: flex;
-      flex-direction: column;
-      min-height: 100vh;
-      padding-top: env(safe-area-inset-top);
-      padding-bottom: env(safe-area-inset-bottom);
-      padding-left: env(safe-area-inset-left);
-      padding-right: env(safe-area-inset-right);
-    }
-
-    header {
-      background-color: var(--bg-secondary);
-      border-bottom: 1px solid var(--border-subtle);
-      padding: 12px 16px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-
-    .logo {
-      font-size: 1.15rem;
-      font-weight: bold;
-      color: var(--accent-blue);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .status-badge {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 0.8rem;
-      padding: 5px 10px;
-      border-radius: 4px;
-      background: var(--bg-input);
-      border: 1px solid var(--border-subtle);
-    }
-
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--status-error);
-      transition: background 0.3s;
-    }
-
-    .dot.online {
-      background: var(--status-active);
-    }
-
-    main {
-      padding: 16px;
-      max-width: 1200px;
-      margin: 0 auto;
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      flex: 1;
-    }
-
-    .card {
-      background: var(--bg-panel);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 14px;
-    }
-
-    .row {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-
-    input, textarea, button {
-      background: var(--bg-input);
-      border: 1px solid var(--border-subtle);
-      color: var(--text-main);
-      padding: 9px 12px;
-      border-radius: 6px;
-      font-size: 0.9rem;
-      appearance: none;
-      -webkit-appearance: none;
-    }
-
-    input:focus, textarea:focus {
-      outline: 1px solid var(--accent-blue);
-      border-color: var(--accent-blue);
-    }
-
-    textarea {
-      width: 100%;
-      min-height: 80px;
-      resize: vertical;
-    }
-
-    button {
-      background: var(--bg-header);
-      cursor: pointer;
-      font-weight: bold;
-      transition: opacity 0.15s, background 0.15s;
-    }
-
-    button:active {
-      opacity: 0.75;
-    }
-
-    button.primary {
-      background: var(--accent-blue);
-      color: #FFFFFF;
-      border-color: var(--accent-blue);
-    }
-
-    button.danger {
-      background: #422023;
-      color: var(--status-error);
-      border-color: #632e33;
-    }
-
-    .stats-bar {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 8px;
-    }
-
-    .stat-item {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-subtle);
-      padding: 10px 12px;
-      border-radius: 6px;
-    }
-
-    .stat-title {
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      margin-bottom: 2px;
-    }
-
-    .stat-value {
-      font-size: 1.05rem;
-      font-weight: bold;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .table-container {
-      overflow-x: auto;
-      border-radius: 6px;
-      border: 1px solid var(--border-subtle);
-      background: var(--bg-panel);
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.85rem;
-      text-align: left;
-    }
-
-    th {
-      background: var(--bg-header);
-      padding: 10px 12px;
-      color: var(--text-muted);
-      font-weight: 600;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    td {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    tr:last-child td {
-      border-bottom: none;
-    }
-
-    .progress-cell {
-      width: 160px;
-    }
-
-    .progress-bar {
-      width: 100%;
-      height: 16px;
-      background: var(--bg-input);
-      border-radius: 4px;
-      overflow: hidden;
-      position: relative;
-      border: 1px solid var(--border-subtle);
-    }
-
-    .progress-fill {
-      height: 100%;
-      background: var(--accent-blue);
-    }
-
-    .progress-fill.done {
-      background: var(--status-finished);
-    }
-
-    .progress-text {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 0.7rem;
-      font-weight: bold;
-    }
-
-    .actions-cell button {
-      padding: 4px 8px;
-      font-size: 0.75rem;
-      margin-right: 4px;
-      border-radius: 4px;
-    }
-
-    /* Explorer Styles */
-    .explorer-path-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding-bottom: 10px;
-      margin-bottom: 10px;
-      border-bottom: 1px solid var(--border-subtle);
-      font-size: 0.85rem;
-    }
-    .explorer-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 8px 12px;
-      border-radius: 4px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-    }
-    .explorer-item:hover {
-      background: var(--bg-header);
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <div class="logo">⬇ DMAN Remote</div>
-    <div class="row">
-      <input type="text" id="serverHost" placeholder="Tunnel Host / IP" style="flex: 2; min-width: 180px;">
-      <input type="password" id="authToken" placeholder="Token" style="flex: 1; min-width: 100px;">
-      <button onclick="saveAndConnect()">Connect</button>
-      <div class="status-badge">
-        <span class="dot" id="statusDot"></span>
-        <span id="statusText">Disconnected</span>
-      </div>
-    </div>
-  </header>
-
-  <main>
-    <div class="stats-bar">
-      <div class="stat-item">
-        <div class="stat-title">GLOBAL SPEED</div>
-        <div class="stat-value" id="statSpeed" style="color: var(--accent-blue);">0 B/s</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-title">RUNNING DOWNLOADS</div>
-        <div class="stat-value" id="statActive">0</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-title">FREE DISK SPACE</div>
-        <div class="stat-value" id="statDisk" style="color: var(--status-active);">-</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-title">ALLDEBRID</div>
-        <div class="stat-value" id="statAD">-</div>
-      </div>
-    </div>
-
-    <!-- Add Download Links Card -->
-    <div class="card">
-      <h3 style="margin-bottom: 10px; font-size: 0.95rem;">Add Download Links</h3>
-      <div style="display: flex; flex-direction: column; gap: 8px;">
-        <textarea id="linksInput" placeholder="Paste direct links, torrents, or magnets (one per line)..."></textarea>
         <div class="row">
           <input type="text" id="targetDirInput" placeholder="Destination path (empty for default)" style="flex: 2; min-width: 160px;">
           <input type="text" id="subfolderInput" placeholder="+ Subfolder / Package" style="flex: 1; min-width: 120px;">
@@ -428,292 +8,119 @@
           </label>
           <button class="primary" onclick="submitLinks()">Start Download</button>
         </div>
-      </div>
-    </div>
+===
+        <div class="row">
+          <input type="text" id="targetDirInput" placeholder="Destination path (empty for default)" style="flex: 2; min-width: 160px;">
+          <button type="button" onclick="openFolderPickerModal()" style="padding: 9px 14px;">Browse...</button>
+          <input type="text" id="subfolderInput" placeholder="+ Subfolder / Package" style="flex: 1; min-width: 120px;">
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-muted); cursor: pointer;">
+            <input type="checkbox" id="useADCheck" checked> AllDebrid Unrestrict
+          </label>
+          <button class="primary" onclick="submitLinks()">Start Download</button>
+        </div>
+>>>
+<<< FIND
+  </main>
 
-    <!-- Downloads Table (Order: Name -> Progress -> Size -> ...) -->
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th class="progress-cell">Progress</th>
-            <th>Size</th>
-            <th>Status</th>
-            <th>Speed</th>
-            <th>ETA</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="downloadsTableBody">
-          <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Connecting to DMAN...</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Simple File Explorer Card -->
-    <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-        <h3 style="font-size: 0.95rem;">📁 File Explorer (Default Folder)</h3>
-        <button onclick="promptCreateFolder()" style="padding: 5px 10px; font-size: 0.8rem;">+ New Folder</button>
-      </div>
-
-      <div class="explorer-path-bar">
-        <span style="color: var(--text-muted);">Path: /</span>
-        <span id="explorerCurrentPath" style="font-weight: bold; color: var(--accent-blue);"></span>
-        <button id="explorerUpBtn" onclick="navigateExplorerUp()" style="padding: 2px 8px; font-size: 0.75rem; margin-left: auto; display: none;">⬆ Up</button>
-      </div>
-
-      <div id="explorerItemsContainer" style="display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto;">
-        <div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Loading files...</div>
+  <script>
+===
+    <!-- Folder Picker Modal -->
+    <div id="folderPickerModal" style="display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; align-items: center; justify-content: center; padding: 16px;">
+      <div class="card" style="width: 100%; max-width: 520px; max-height: 85vh; display: flex; flex-direction: column; gap: 10px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h3 style="font-size: 0.95rem;">📁 Select Destination Folder</h3>
+          <button onclick="closeFolderPickerModal()" style="padding: 4px 8px; font-size: 0.8rem;">✕</button>
+        </div>
+        <div class="explorer-path-bar" style="margin-bottom: 0;">
+          <span style="color: var(--text-muted);">Folder: /</span>
+          <span id="pickerCurrentPath" style="font-weight: bold; color: var(--accent-blue);"></span>
+          <button id="pickerUpBtn" onclick="navigatePickerUp()" style="padding: 2px 8px; font-size: 0.75rem; margin-left: auto; display: none;">⬆ Up</button>
+        </div>
+        <div id="pickerItemsContainer" style="display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 320px; min-height: 140px;">
+        </div>
+        <div class="row" style="justify-content: flex-end; margin-top: 6px;">
+          <button onclick="closeFolderPickerModal()">Cancel</button>
+          <button class="primary" onclick="confirmPickerFolder()">Choose Current Folder</button>
+        </div>
       </div>
     </div>
   </main>
 
   <script>
-    // Empty by default - values are stored ONLY in the user's localStorage
-    let host = (localStorage.getItem("dman_host") || "").trim();
-    let token = (localStorage.getItem("dman_token") || "").trim();
-    let savedDir = localStorage.getItem("dman_saved_dir") || "";
-    let currentExplorerSubpath = "";
-    let cachedFreeBytes = 0;
-
-    document.getElementById("serverHost").value = host;
-    document.getElementById("authToken").value = token;
-    document.getElementById("targetDirInput").value = savedDir;
-
-    function buildBaseUrl(raw) {
-      let cleaned = raw.trim();
-      if (!cleaned) return "http://127.0.0.1:6801";
-      if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
-        return cleaned.replace(/\/+$/, "");
-      }
-      if (cleaned.includes("trycloudflare.com") || cleaned.includes(".")) {
-        return `https://${cleaned}`.replace(/\/+$/, "");
-      }
-      return `http://${cleaned}:6801`.replace(/\/+$/, "");
-    }
-
-    function saveAndConnect() {
-      host = document.getElementById("serverHost").value.trim();
-      token = document.getElementById("authToken").value.trim();
-      localStorage.setItem("dman_host", host);
-      localStorage.setItem("dman_token", token);
-      fetchStatus();
-      loadExplorer(currentExplorerSubpath);
-    }
-
-    async function apiRequest(endpoint, method = "GET", body = null) {
-      if (!host) return null;
-      const baseUrl = buildBaseUrl(host);
-      const url = `${baseUrl}${endpoint}`;
-      const headers = {
-        "Content-Type": "application/json",
-        "X-DMAN-Token": token
-      };
-
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
-        const resp = await fetch(url, {
-          method,
-          headers,
-          body: body ? JSON.stringify(body) : null,
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-        if (!resp.ok) return null;
-        return await resp.json();
-      } catch (e) {
-        return null;
-      }
-    }
-
-    async function fetchStatus() {
-      const res = await apiRequest("/api/status");
-      const dot = document.getElementById("statusDot");
-      const stText = document.getElementById("statusText");
-
-      if (!res || res.status !== "ok") {
-        dot.className = "dot";
-        stText.innerText = "Offline";
-        return;
-      }
-
-      dot.className = "dot online";
-      stText.innerText = "Connected";
-
-      const d = res.data;
-      cachedFreeBytes = d.freeBytes || 0;
-      document.getElementById("statSpeed").innerText = d.globalSpeedStr || "0 B/s";
-      document.getElementById("statActive").innerText = d.activeDownloads || 0;
-      document.getElementById("statDisk").innerText = d.freeSpaceStr || "-";
-      document.getElementById("statAD").innerText = d.alldebridStatus || "Disabled";
-
-      if (!document.getElementById("targetDirInput").value && d.defaultSaveDir) {
-        document.getElementById("targetDirInput").value = d.defaultSaveDir;
-      }
-
-      renderTable(d.downloads || []);
-    }
-
-    function renderTable(items) {
-      const tbody = document.getElementById("downloadsTableBody");
-      if (!items || items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Queue is empty.</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = items.map(it => {
-        const isDone = it.status === "complete";
-        const fillClass = isDone ? "progress-fill done" : "progress-fill";
-        return `
-          <tr>
-            <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${it.name}">
-              ${it.name}
-            </td>
-            <td class="progress-cell">
-              <div class="progress-bar">
-                <div class="${fillClass}" style="width: ${it.progress || 0}%;"></div>
-                <div class="progress-text">${(it.progress || 0).toFixed(0)}%</div>
-              </div>
-            </td>
-            <td>${it.sizeStr || "-"}</td>
-            <td>${it.statusDisplay || it.status}</td>
-            <td style="color: var(--accent-blue);">${it.speedStr || "-"}</td>
-            <td>${it.etaStr || "~"}</td>
-            <td class="actions-cell">
-              ${it.status === "active" ? `<button onclick="doAction('pause', '${it.gid}')">Pause</button>` : ""}
-              ${it.status === "paused" ? `<button onclick="doAction('resume', '${it.gid}')">Resume</button>` : ""}
-              <button onclick="doAction('remove', '${it.gid}')" style="color: var(--status-error);">✕</button>
-            </td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-    async function submitLinks() {
-      const text = document.getElementById("linksInput").value.trim();
-      if (!text) return;
-
-      const saveDir = document.getElementById("targetDirInput").value.trim();
-      const subfolder = document.getElementById("subfolderInput").value.trim();
-      const useAD = document.getElementById("useADCheck").checked;
-
-      // Probe space requirement before initiating download
-      const probeRes = await apiRequest("/api/probe", "POST", { links: text, saveDir });
-      if (probeRes && probeRes.status === "ok") {
-        const req = probeRes.data.requiredBytes || 0;
-        const free = probeRes.data.freeBytes || cachedFreeBytes;
-        if (req > 0 && free > 0 && req > free) {
-          alert(`Not enough disk space!\nRequired: ${probeRes.data.requiredStr}\nFree Space: ${probeRes.data.freeStr}`);
-          return;
-        }
-      }
-
-      if (saveDir) {
-        localStorage.setItem("dman_saved_dir", saveDir);
-      }
-
-      await apiRequest("/api/add", "POST", { links: text, saveDir, subfolder, useAlldebrid: useAD });
-      document.getElementById("linksInput").value = "";
-      document.getElementById("subfolderInput").value = "";
+>>>
+<<< FIND
+    async function doAction(action, gid) {
+      await apiRequest("/api/action", "POST", { action, gid });
       fetchStatus();
     }
-
+===
     async function doAction(action, gid) {
       await apiRequest("/api/action", "POST", { action, gid });
       fetchStatus();
     }
 
-    // --- File Explorer Logic ---
-    async function loadExplorer(subpath = "") {
-      currentExplorerSubpath = subpath;
-      document.getElementById("explorerCurrentPath").innerText = subpath || "root";
-      document.getElementById("explorerUpBtn").style.display = subpath ? "inline-block" : "none";
+    // --- Folder Picker Modal Logic ---
+    let pickerSubpath = "";
+
+    function openFolderPickerModal() {
+      pickerSubpath = "";
+      document.getElementById("folderPickerModal").style.display = "flex";
+      loadPickerFolders("");
+    }
+
+    function closeFolderPickerModal() {
+      document.getElementById("folderPickerModal").style.display = "none";
+    }
+
+    async function loadPickerFolders(subpath = "") {
+      pickerSubpath = subpath;
+      document.getElementById("pickerCurrentPath").innerText = subpath || "root";
+      document.getElementById("pickerUpBtn").style.display = subpath ? "inline-block" : "none";
 
       const res = await apiRequest("/api/fs/list", "POST", { subpath });
-      const container = document.getElementById("explorerItemsContainer");
+      const container = document.getElementById("pickerItemsContainer");
 
       if (!res || res.status !== "ok") {
         container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Cannot read folder.</div>';
         return;
       }
 
-      const items = res.items || [];
-      if (items.length === 0) {
-        container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">Folder is empty.</div>';
+      const folders = (res.items || []).filter(item => item.isDir);
+      if (folders.length === 0) {
+        container.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; padding: 10px;">No subfolders inside. Click "Choose Current Folder" below to select this path.</div>';
         return;
       }
 
-      container.innerHTML = items.map(item => {
-        const icon = item.isDir ? "📁" : "📄";
-        return `
-          <div class="explorer-item">
-            <div style="display: flex; align-items: center; gap: 8px; flex: 1; cursor: ${item.isDir ? 'pointer' : 'default'}; overflow: hidden;"
-                 onclick="${item.isDir ? `navigateExplorerInto('${escapeHtml(item.name)}')` : ''}">
-              <span>${icon}</span>
-              <span style="font-weight: ${item.isDir ? 'bold' : 'normal'}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</span>
-              ${!item.isDir ? `<span style="font-size: 0.75rem; color: var(--text-muted); margin-left: 6px;">(${item.size})</span>` : ''}
-            </div>
-            <div style="display: flex; gap: 4px;">
-              <button onclick="promptRename('${escapeHtml(item.name)}')" style="padding: 3px 6px; font-size: 0.75rem;">Rename</button>
-              ${!item.isDir ? `<button class="danger" onclick="deleteFile('${escapeHtml(item.name)}')" style="padding: 3px 6px; font-size: 0.75rem;">Delete</button>` : ''}
-            </div>
+      container.innerHTML = folders.map(folder => `
+        <div class="explorer-item" style="cursor: pointer;" onclick="navigatePickerInto('${escapeHtml(folder.name)}')">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span>📁</span>
+            <span style="font-weight: bold;">${escapeHtml(folder.name)}</span>
           </div>
-        `;
-      }).join("");
+          <span style="color: var(--accent-blue); font-size: 0.8rem;">Open ➔</span>
+        </div>
+      `).join("");
     }
 
-    function navigateExplorerInto(folderName) {
-      const next = currentExplorerSubpath ? `${currentExplorerSubpath}/${folderName}` : folderName;
-      loadExplorer(next);
+    function navigatePickerInto(name) {
+      const next = pickerSubpath ? `${pickerSubpath}/${name}` : name;
+      loadPickerFolders(next);
     }
 
-    function navigateExplorerUp() {
-      if (!currentExplorerSubpath) return;
-      const parts = currentExplorerSubpath.split("/").filter(Boolean);
+    function navigatePickerUp() {
+      if (!pickerSubpath) return;
+      const parts = pickerSubpath.split("/").filter(Boolean);
       parts.pop();
-      loadExplorer(parts.join("/"));
+      loadPickerFolders(parts.join("/"));
     }
 
-    async function promptCreateFolder() {
-      const name = prompt("Enter new folder name:");
-      if (!name || !name.trim()) return;
-      await apiRequest("/api/fs/mkdir", "POST", { subpath: currentExplorerSubpath, name: name.trim() });
-      loadExplorer(currentExplorerSubpath);
+    async function confirmPickerFolder() {
+      const stateRes = await apiRequest("/api/status");
+      const baseDir = (stateRes && stateRes.data && stateRes.data.defaultSaveDir) ? stateRes.data.defaultSaveDir.replace(/[\/\\]+$/, "") : "";
+      const chosen = pickerSubpath ? `${baseDir}/${pickerSubpath}` : baseDir;
+      document.getElementById("targetDirInput").value = chosen;
+      localStorage.setItem("dman_saved_dir", chosen);
+      closeFolderPickerModal();
     }
-
-    async function promptRename(oldName) {
-      const newName = prompt(`Rename "${oldName}" to:`, oldName);
-      if (!newName || !newName.trim() || newName.trim() === oldName) return;
-      await apiRequest("/api/fs/rename", "POST", { subpath: currentExplorerSubpath, oldName, newName: newName.trim() });
-      loadExplorer(currentExplorerSubpath);
-    }
-
-    async function deleteFile(name) {
-      if (!confirm(`Are you sure you want to permanently delete file "${name}"?`)) return;
-      const res = await apiRequest("/api/fs/delete", "POST", { subpath: currentExplorerSubpath, name });
-      if (res && res.status === "ok") {
-        loadExplorer(currentExplorerSubpath);
-      } else {
-        alert(res?.message || "Failed to delete file.");
-      }
-    }
-
-    function escapeHtml(str) {
-      return str.replace(/'/g, "\\'").replace(/"/g, "&quot;");
-    }
-
-    // Auto-refresh watchdog for downloads and explorer
-    setInterval(() => {
-      fetchStatus();
-      loadExplorer(currentExplorerSubpath);
-    }, 2500);
-
-    fetchStatus();
-    loadExplorer();
-  </script>
-</body>
-</html>
+>>>
 ### END
