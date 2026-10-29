@@ -1,43 +1,481 @@
-### EDIT: models/download_model.py
-<<< FIND
-        packages_map: Dict[str, List[Dict[str, Any]]] = {}
-        for child in merged_children:
-            pk = child["packageKey"]
-            if pk not in packages_map:
-                packages_map[pk] = []
-            packages_map[pk].append(child)
+### FILE: index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>DMAN Web Remote</title>
 
-        new_rows: List[Dict[str, Any]] = []
-        for pk, pkg_children in packages_map.items():
-            # Sort files naturally by episode/number inside each folder package
-            pkg_children.sort(key=lambda c: natural_sort_key(c.get("name", "")))
-            for idx_num, child_row in enumerate(pkg_children, start=1):
-                child_row["itemNumber"] = idx_num
-            new_rows.append(self._build_package_header(pk, pkg_children))
-            new_rows.extend(pkg_children)
-===
-        packages_map: Dict[str, List[Dict[str, Any]]] = {}
-        for child in merged_children:
-            pk = child["packageKey"]
-            if pk not in packages_map:
-                packages_map[pk] = []
-            packages_map[pk].append(child)
+  <!-- iOS Safari Web App (PWA) Meta Tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="DMAN Remote">
+  <meta name="theme-color" content="#181A1D">
+  <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/ViolinMai/DMAN/main/ui/Theme.qml">
 
-        # Sort packages descending: newly added or recently updated batch sits at the very top
-        sorted_pkg_keys = sorted(
-            packages_map.keys(),
-            key=lambda pk: max((c.get("updatedAt", 0) for c in packages_map[pk]), default=0),
-            reverse=True,
-        )
+  <style>
+    :root {
+      --bg-primary: #181A1D;
+      --bg-secondary: #202327;
+      --bg-panel: #26292E;
+      --bg-header: #2D3137;
+      --bg-input: #141619;
+      --text-main: #ECEFF4;
+      --text-muted: #A5B0C0;
+      --border-subtle: #343942;
+      --accent-blue: #5B9BD5;
+      --status-active: #6CC644;
+      --status-paused: #E5C07B;
+      --status-error: #E06C75;
+      --status-finished: #C678DD;
+    }
 
-        new_rows: List[Dict[str, Any]] = []
-        for pk in sorted_pkg_keys:
-            pkg_children = packages_map[pk]
-            # Inside the package, keep natural sorting (e.g. Episode 1, 2, 3...)
-            pkg_children.sort(key=lambda c: natural_sort_key(c.get("name", "")))
-            for idx_num, child_row in enumerate(pkg_children, start=1):
-                child_row["itemNumber"] = idx_num
-            new_rows.append(self._build_package_header(pk, pkg_children))
-            new_rows.extend(pkg_children)
->>>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+    }
+
+    header {
+      background-color: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .logo {
+      font-size: 1.15rem;
+      font-weight: bold;
+      color: var(--accent-blue);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      padding: 5px 10px;
+      border-radius: 4px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--status-error);
+      transition: background 0.3s;
+    }
+
+    .dot.online {
+      background: var(--status-active);
+    }
+
+    main {
+      padding: 16px;
+      max-width: 1200px;
+      margin: 0 auto;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      flex: 1;
+    }
+
+    .card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    input, textarea, button {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-main);
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+
+    input:focus, textarea:focus {
+      outline: 1px solid var(--accent-blue);
+      border-color: var(--accent-blue);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 85px;
+      resize: vertical;
+    }
+
+    button {
+      background: var(--bg-header);
+      cursor: pointer;
+      font-weight: bold;
+      transition: opacity 0.15s, background 0.15s;
+    }
+
+    button:active {
+      opacity: 0.75;
+    }
+
+    button.primary {
+      background: var(--accent-blue);
+      color: #FFFFFF;
+      border-color: var(--accent-blue);
+    }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+    }
+
+    .stat-item {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-subtle);
+      padding: 10px 12px;
+      border-radius: 6px;
+    }
+
+    .stat-title {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-value {
+      font-size: 1.05rem;
+      font-weight: bold;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .table-container {
+      overflow-x: auto;
+      border-radius: 6px;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-panel);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+
+    th {
+      background: var(--bg-header);
+      padding: 10px 12px;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .progress-cell {
+      width: 130px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 16px;
+      background: var(--bg-input);
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--accent-blue);
+    }
+
+    .progress-fill.done {
+      background: var(--status-finished);
+    }
+
+    .progress-text {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-weight: bold;
+    }
+
+    .actions-cell button {
+      padding: 5px 8px;
+      font-size: 0.75rem;
+      margin-right: 4px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">⬇ DMAN Remote</div>
+    <div class="row">
+      <input type="text" id="serverHost" placeholder="Tunnel Host / IP" style="flex: 2; min-width: 180px;">
+      <input type="password" id="authToken" placeholder="Token" style="flex: 1; min-width: 100px;">
+      <button onclick="saveAndConnect()">Connect</button>
+      <div class="status-badge">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">Disconnected</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-title">GLOBAL SPEED</div>
+        <div class="stat-value" id="statSpeed" style="color: var(--accent-blue);">0 B/s</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-title">RUNNING DOWNLOADS</div>
+        <div class="stat-value" id="statActive">0</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-title">FREE DISK SPACE</div>
+        <div class="stat-value" id="statDisk" style="color: var(--status-active);">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-title">ALLDEBRID</div>
+        <div class="stat-value" id="statAD">-</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom: 10px; font-size: 0.95rem;">Add Download Links</h3>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <textarea id="linksInput" placeholder="Paste direct links, torrents, or magnets (one per line)..."></textarea>
+        <div class="row">
+          <input type="text" id="targetDirInput" placeholder="Destination path (empty for default)" style="flex: 2; min-width: 160px;">
+          <input type="text" id="subfolderInput" placeholder="+ Subfolder / Package" style="flex: 1; min-width: 120px;">
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-muted); cursor: pointer;">
+            <input type="checkbox" id="useADCheck" checked> AllDebrid Unrestrict
+          </label>
+          <button class="primary" onclick="submitLinks()">Start Download</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Size</th>
+            <th>Status</th>
+            <th>Speed</th>
+            <th>ETA</th>
+            <th class="progress-cell">Progress</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="downloadsTableBody">
+          <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Connecting to DMAN...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    // Load stored values automatically from localStorage
+    let host = (localStorage.getItem("dman_host") || "inclusive-legislative-steady-tide.trycloudflare.com").trim();
+    let token = (localStorage.getItem("dman_token") || "dman_remote_2026").trim();
+    let savedDir = localStorage.getItem("dman_saved_dir") || "";
+
+    document.getElementById("serverHost").value = host;
+    document.getElementById("authToken").value = token;
+    document.getElementById("targetDirInput").value = savedDir;
+
+    function buildBaseUrl(raw) {
+      let cleaned = raw.trim();
+      if (!cleaned) return "http://127.0.0.1:6801";
+
+      // If full protocol already supplied
+      if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
+        return cleaned.replace(/\/+$/, "");
+      }
+
+      // If it is a Cloudflare Tunnel or domain name -> use https without custom port
+      if (cleaned.includes("trycloudflare.com") || cleaned.includes(".")) {
+        return `https://${cleaned}`.replace(/\/+$/, "");
+      }
+
+      // Fallback for local IP / localhost
+      return `http://${cleaned}:6801`.replace(/\/+$/, "");
+    }
+
+    function saveAndConnect() {
+      host = document.getElementById("serverHost").value.trim();
+      token = document.getElementById("authToken").value.trim();
+      localStorage.setItem("dman_host", host);
+      localStorage.setItem("dman_token", token);
+      fetchStatus();
+    }
+
+    async function apiRequest(endpoint, method = "GET", body = null) {
+      const baseUrl = buildBaseUrl(host);
+      const url = `${baseUrl}${endpoint}`;
+      const headers = {
+        "Content-Type": "application/json",
+        "X-DMAN-Token": token
+      };
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const resp = await fetch(url, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : null,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function fetchStatus() {
+      const res = await apiRequest("/api/status");
+      const dot = document.getElementById("statusDot");
+      const stText = document.getElementById("statusText");
+
+      if (!res || res.status !== "ok") {
+        dot.className = "dot";
+        stText.innerText = "Offline";
+        return;
+      }
+
+      dot.className = "dot online";
+      stText.innerText = "Connected";
+
+      const d = res.data;
+      document.getElementById("statSpeed").innerText = d.globalSpeedStr || "0 B/s";
+      document.getElementById("statActive").innerText = d.activeDownloads || 0;
+      document.getElementById("statDisk").innerText = d.freeSpaceStr || "-";
+      document.getElementById("statAD").innerText = d.alldebridStatus || "Disabled";
+
+      if (!document.getElementById("targetDirInput").value && d.defaultSaveDir) {
+        document.getElementById("targetDirInput").value = d.defaultSaveDir;
+      }
+
+      renderTable(d.downloads || []);
+    }
+
+    function renderTable(items) {
+      const tbody = document.getElementById("downloadsTableBody");
+      if (!items || items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Queue is empty.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = items.map(it => {
+        const isDone = it.status === "complete";
+        const fillClass = isDone ? "progress-fill done" : "progress-fill";
+        return `
+          <tr>
+            <td style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${it.name}">
+              ${it.name}
+            </td>
+            <td>${it.sizeStr || "-"}</td>
+            <td>${it.statusDisplay || it.status}</td>
+            <td style="color: var(--accent-blue);">${it.speedStr || "-"}</td>
+            <td>${it.etaStr || "~"}</td>
+            <td class="progress-cell">
+              <div class="progress-bar">
+                <div class="${fillClass}" style="width: ${it.progress || 0}%;"></div>
+                <div class="progress-text">${(it.progress || 0).toFixed(0)}%</div>
+              </div>
+            </td>
+            <td class="actions-cell">
+              ${it.status === "active" ? `<button onclick="doAction('pause', '${it.gid}')">Pause</button>` : ""}
+              ${it.status === "paused" ? `<button onclick="doAction('resume', '${it.gid}')">Resume</button>` : ""}
+              <button onclick="doAction('remove', '${it.gid}')" style="color: var(--status-error);">✕</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function submitLinks() {
+      const text = document.getElementById("linksInput").value.trim();
+      if (!text) return;
+
+      const saveDir = document.getElementById("targetDirInput").value.trim();
+      const subfolder = document.getElementById("subfolderInput").value.trim();
+      const useAD = document.getElementById("useADCheck").checked;
+
+      if (saveDir) {
+        localStorage.setItem("dman_saved_dir", saveDir);
+      }
+
+      await apiRequest("/api/add", "POST", { links: text, saveDir, subfolder, useAlldebrid: useAD });
+      document.getElementById("linksInput").value = "";
+      document.getElementById("subfolderInput").value = "";
+      fetchStatus();
+    }
+
+    async function doAction(action, gid) {
+      await apiRequest("/api/action", "POST", { action, gid });
+      fetchStatus();
+    }
+
+    // Auto-refresh every 2 seconds
+    setInterval(fetchStatus, 2000);
+    fetchStatus();
+  </script>
+</body>
+</html>
 ### END

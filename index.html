@@ -1,9 +1,17 @@
 <!DOCTYPE html>
-<html lang="en" dir="ltr">
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DMAN Remote Control — Web Companion</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>DMAN Web Remote</title>
+
+  <!-- iOS Safari Web App (PWA) Meta Tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="DMAN Remote">
+  <meta name="theme-color" content="#181A1D">
+  <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/ViolinMai/DMAN/main/ui/Theme.qml">
+
   <style>
     :root {
       --bg-primary: #181A1D;
@@ -11,363 +19,461 @@
       --bg-panel: #26292E;
       --bg-header: #2D3137;
       --bg-input: #141619;
+      --text-main: #ECEFF4;
+      --text-muted: #A5B0C0;
       --border-subtle: #343942;
-      --border-focus: #4D88FF;
-      --text-primary: #ECEFF4;
-      --text-secondary: #A5B0C0;
-      --text-muted: #6C7686;
       --accent-blue: #5B9BD5;
       --status-active: #6CC644;
       --status-paused: #E5C07B;
       --status-error: #E06C75;
-      --status-finished: #73C991;
+      --status-finished: #C678DD;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
-    body { background: var(--bg-primary); color: var(--text-primary); min-height: 100vh; display: flex; flex-direction: column; }
-    header {
-      background: var(--bg-secondary);
-      border-bottom: 1px solid var(--border-subtle);
-      padding: 12px 18px;
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-main);
       display: flex;
-      flex-wrap: wrap;
-      align-items: center;
+      flex-direction: column;
+      min-height: 100vh;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+    }
+
+    header {
+      background-color: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 12px 16px;
+      display: flex;
       justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
       gap: 10px;
     }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 15px; }
-    .badge {
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 12px;
-      background: var(--bg-input);
-      border: 1px solid var(--border-subtle);
-      display: inline-flex;
+
+    .logo {
+      font-size: 1.15rem;
+      font-weight: bold;
+      color: var(--accent-blue);
+      display: flex;
       align-items: center;
       gap: 6px;
     }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-error); }
-    .dot.online { background: var(--status-active); }
-    main { max-width: 1180px; width: 100%; margin: 16px auto; padding: 0 14px; display: flex; flex-direction: column; gap: 14px; flex: 1; }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.8rem;
+      padding: 5px 10px;
+      border-radius: 4px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--status-error);
+      transition: background 0.3s;
+    }
+
+    .dot.online {
+      background: var(--status-active);
+    }
+
+    main {
+      padding: 16px;
+      max-width: 1200px;
+      margin: 0 auto;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      flex: 1;
+    }
+
     .card {
       background: var(--bg-panel);
       border: 1px solid var(--border-subtle);
-      border-radius: 6px;
+      border-radius: 8px;
       padding: 14px;
     }
-    .card-title { font-size: 13px; font-weight: 700; color: var(--accent-blue); margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-    input, textarea, select {
-      background: var(--bg-input);
-      color: var(--text-primary);
-      border: 1px solid var(--border-subtle);
-      border-radius: 4px;
-      padding: 7px 10px;
-      font-size: 13px;
-      outline: none;
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
     }
-    input:focus, textarea:focus { border-color: var(--border-focus); }
-    textarea { width: 100%; min-height: 82px; resize: vertical; }
+
+    input, textarea, button {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-main);
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+
+    input:focus, textarea:focus {
+      outline: 1px solid var(--accent-blue);
+      border-color: var(--accent-blue);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 85px;
+      resize: vertical;
+    }
+
     button {
       background: var(--bg-header);
-      color: var(--text-primary);
-      border: 1px solid var(--border-subtle);
-      border-radius: 4px;
-      padding: 7px 14px;
-      font-size: 12px;
-      font-weight: 600;
       cursor: pointer;
-      transition: 0.15s;
+      font-weight: bold;
+      transition: opacity 0.15s, background 0.15s;
     }
-    button:hover { background: #353B45; }
-    button.primary { background: var(--accent-blue); border-color: var(--border-focus); color: #fff; }
-    button.primary:hover { background: #4A89C7; }
-    button.success { border-color: var(--status-active); color: var(--status-active); }
-    button.danger { border-color: var(--status-error); color: var(--status-error); }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-    .chip {
-      font-size: 11px;
-      padding: 4px 9px;
+
+    button:active {
+      opacity: 0.75;
+    }
+
+    button.primary {
+      background: var(--accent-blue);
+      color: #FFFFFF;
+      border-color: var(--accent-blue);
+    }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+    }
+
+    .stat-item {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-subtle);
+      padding: 10px 12px;
+      border-radius: 6px;
+    }
+
+    .stat-title {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-value {
+      font-size: 1.05rem;
+      font-weight: bold;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .table-container {
+      overflow-x: auto;
+      border-radius: 6px;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-panel);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      text-align: left;
+    }
+
+    th {
       background: var(--bg-header);
-      border: 1px solid var(--border-subtle);
-      border-radius: 4px;
-      cursor: pointer;
-      color: var(--text-secondary);
+      padding: 10px 12px;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-subtle);
     }
-    .chip:hover { border-color: var(--border-focus); color: var(--text-primary); }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
-    .stat-box { background: var(--bg-secondary); border: 1px solid var(--border-subtle); padding: 10px; border-radius: 4px; }
-    .stat-label { font-size: 11px; color: var(--text-muted); }
-    .stat-val { font-size: 15px; font-weight: 700; margin-top: 3px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-subtle); }
-    th { background: var(--bg-header); color: var(--text-secondary); }
-    tr:nth-child(even) { background: #1E2125; }
-    .pbar { width: 110px; height: 16px; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 3px; position: relative; overflow: hidden; }
-    .pfill { height: 100%; background: #6897BB; }
-    .ptxt { position: absolute; inset: 0; text-align: center; font-size: 10px; line-height: 14px; font-weight: 700; }
-    .space-ok { color: var(--status-finished); font-weight: 700; }
-    .space-warn { color: var(--status-error); font-weight: 700; }
+
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .progress-cell {
+      width: 130px;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 16px;
+      background: var(--bg-input);
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--accent-blue);
+    }
+
+    .progress-fill.done {
+      background: var(--status-finished);
+    }
+
+    .progress-text {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-weight: bold;
+    }
+
+    .actions-cell button {
+      padding: 5px 8px;
+      font-size: 0.75rem;
+      margin-right: 4px;
+      border-radius: 4px;
+    }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">
-      <span>⬇ DMAN Remote Web Companion</span>
-      <span class="badge"><span id="connDot" class="dot"></span><span id="connText">Disconnected</span></span>
-      <span class="badge" id="adBadge">AllDebrid: -</span>
-    </div>
+    <div class="logo">⬇ DMAN Remote</div>
     <div class="row">
-      <input id="hostInput" type="text" placeholder="http://127.0.0.1:6801 or Tailscale/Tunnel URL" style="width: 260px;" />
-      <input id="tokenInput" type="password" placeholder="API Token" style="width: 140px;" />
-      <button class="primary" onclick="saveConnection()">Connect PC</button>
+      <input type="text" id="serverHost" placeholder="Tunnel Host / IP" style="flex: 2; min-width: 180px;">
+      <input type="password" id="authToken" placeholder="Token" style="flex: 1; min-width: 100px;">
+      <button onclick="saveAndConnect()">Connect</button>
+      <div class="status-badge">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">Disconnected</span>
+      </div>
     </div>
   </header>
 
   <main>
-    <!-- Overview Metrics -->
-    <div class="stats-grid">
-      <div class="stat-box">
-        <div class="stat-label">Download Speed</div>
-        <div class="stat-val" id="stSpeed" style="color: var(--accent-blue);">0 B/s</div>
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div class="stat-title">GLOBAL SPEED</div>
+        <div class="stat-value" id="statSpeed" style="color: var(--accent-blue);">0 B/s</div>
       </div>
-      <div class="stat-box">
-        <div class="stat-label">Active / Total Tasks</div>
-        <div class="stat-val" id="stTasks">0 / 0</div>
+      <div class="stat-item">
+        <div class="stat-title">RUNNING DOWNLOADS</div>
+        <div class="stat-value" id="statActive">0</div>
       </div>
-      <div class="stat-box">
-        <div class="stat-label">Loaded / Total Size</div>
-        <div class="stat-val" id="stBytes">0 B / 0 B</div>
+      <div class="stat-item">
+        <div class="stat-title">FREE DISK SPACE</div>
+        <div class="stat-value" id="statDisk" style="color: var(--status-active);">-</div>
       </div>
-      <div class="stat-box">
-        <div class="stat-label">Target Disk Free Space</div>
-        <div class="stat-val space-ok" id="stFree">Checking...</div>
+      <div class="stat-item">
+        <div class="stat-title">ALLDEBRID</div>
+        <div class="stat-value" id="statAD">-</div>
       </div>
     </div>
 
-    <!-- Add Remote Download Card -->
     <div class="card">
-      <div class="card-title">
-        <span>+ Remote Download & Folder Setup</span>
-        <span id="probeStatus" style="font-size: 12px; color: var(--text-secondary);">Paste links to check size & disk space</span>
-      </div>
-      <textarea id="linksInput" placeholder="Paste HTTP, AllDebrid host links, or magnet:?xt=... (one or multiple)" oninput="debouncedProbe()"></textarea>
-
-      <div class="row" style="margin-top: 10px;">
-        <input id="saveDirInput" type="text" placeholder="Base Save Directory on PC (e.g. D:/Downloads)" style="flex: 2; min-width: 220px;" oninput="checkDiskSpace()" />
-        <input id="subfolderInput" type="text" placeholder="Create New Subfolder (Optional)" style="flex: 1; min-width: 180px;" />
-        <label style="font-size: 12px; display: flex; align-items: center; gap: 6px; color: var(--status-active);">
-          <input id="useAdCheck" type="checkbox" checked /> Unrestrict via AllDebrid
-        </label>
-        <button onclick="probeNow()">Check Size & Space</button>
-        <button class="primary" onclick="submitRemoteDownload()">Start Remote Download</button>
-      </div>
-
-      <div class="chips" id="recentDirsChips"></div>
-      <div class="chips" id="subdirsChips"></div>
-    </div>
-
-    <!-- Live Queue & Permanent History Table -->
-    <div class="card" style="overflow-x: auto;">
-      <div class="card-title">
-        <span>Live PC Queue & Permanent History</span>
+      <h3 style="margin-bottom: 10px; font-size: 0.95rem;">Add Download Links</h3>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <textarea id="linksInput" placeholder="Paste direct links, torrents, or magnets (one per line)..."></textarea>
         <div class="row">
-          <button onclick="sendAction('resume_all', '')">▶▶ Resume All</button>
-          <button onclick="sendAction('pause_all', '')">⏸⏸ Pause All</button>
+          <input type="text" id="targetDirInput" placeholder="Destination path (empty for default)" style="flex: 2; min-width: 160px;">
+          <input type="text" id="subfolderInput" placeholder="+ Subfolder / Package" style="flex: 1; min-width: 120px;">
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-muted); cursor: pointer;">
+            <input type="checkbox" id="useADCheck" checked> AllDebrid Unrestrict
+          </label>
+          <button class="primary" onclick="submitLinks()">Start Download</button>
         </div>
       </div>
+    </div>
+
+    <div class="table-container">
       <table>
         <thead>
           <tr>
-            <th>File Name</th>
+            <th>Name</th>
             <th>Size</th>
             <th>Status</th>
             <th>Speed</th>
             <th>ETA</th>
-            <th>Progress</th>
-            <th>Save Directory</th>
+            <th class="progress-cell">Progress</th>
             <th>Actions</th>
           </tr>
         </thead>
-        <tbody id="downloadsBody">
-          <tr><td colspan="8" style="text-align:center; color: var(--text-muted);">Waiting for PC connection...</td></tr>
+        <tbody id="downloadsTableBody">
+          <tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Connecting to DMAN...</td></tr>
         </tbody>
       </table>
     </div>
   </main>
 
   <script>
-    let apiHost = localStorage.getItem("dman_api_host") || "http://127.0.0.1:6801";
-    let apiToken = localStorage.getItem("dman_api_token") || "dman_remote_2026";
-    let probeTimer = null;
-    let initializedDir = false;
+    // Load stored values automatically from localStorage
+    let host = (localStorage.getItem("dman_host") || "inclusive-legislative-steady-tide.trycloudflare.com").trim();
+    let token = (localStorage.getItem("dman_token") || "dman_remote_2026").trim();
+    let savedDir = localStorage.getItem("dman_saved_dir") || "";
 
-    document.getElementById("hostInput").value = apiHost;
-    document.getElementById("tokenInput").value = apiToken;
+    document.getElementById("serverHost").value = host;
+    document.getElementById("authToken").value = token;
+    document.getElementById("targetDirInput").value = savedDir;
 
-    function saveConnection() {
-      apiHost = document.getElementById("hostInput").value.trim().replace(/\/+$/, "");
-      apiToken = document.getElementById("tokenInput").value.trim();
-      localStorage.setItem("dman_api_host", apiHost);
-      localStorage.setItem("dman_api_token", apiToken);
-      initializedDir = false;
-      pollState();
+    function buildBaseUrl(raw) {
+      let cleaned = raw.trim();
+      if (!cleaned) return "http://127.0.0.1:6801";
+
+      // If full protocol already supplied
+      if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
+        return cleaned.replace(/\/+$/, "");
+      }
+
+      // If it is a Cloudflare Tunnel or domain name -> use https without custom port
+      if (cleaned.includes("trycloudflare.com") || cleaned.includes(".")) {
+        return `https://${cleaned}`.replace(/\/+$/, "");
+      }
+
+      // Fallback for local IP / localhost
+      return `http://${cleaned}:6801`.replace(/\/+$/, "");
     }
 
-    async function apiFetch(path, options = {}) {
-      const headers = Object.assign({
+    function saveAndConnect() {
+      host = document.getElementById("serverHost").value.trim();
+      token = document.getElementById("authToken").value.trim();
+      localStorage.setItem("dman_host", host);
+      localStorage.setItem("dman_token", token);
+      fetchStatus();
+    }
+
+    async function apiRequest(endpoint, method = "GET", body = null) {
+      const baseUrl = buildBaseUrl(host);
+      const url = `${baseUrl}${endpoint}`;
+      const headers = {
         "Content-Type": "application/json",
-        "X-DMAN-Token": apiToken
-      }, options.headers || {});
-      const resp = await fetch(apiHost + path, Object.assign({}, options, { headers }));
-      return await resp.json();
-    }
+        "X-DMAN-Token": token
+      };
 
-    async function checkDiskSpace() {
-      const dir = document.getElementById("saveDirInput").value.trim();
       try {
-        const res = await apiFetch("/api/disk?path=" + encodeURIComponent(dir));
-        if (res.status === "ok") {
-          document.getElementById("stFree").textContent = res.freeStr + " Free";
-          const subContainer = document.getElementById("subdirsChips");
-          subContainer.innerHTML = (res.subdirs || []).slice(0, 12).map(sub =>
-            `<span class="chip" onclick="selectSubfolder('${sub.replace(/'/g, "\\'")}')">📁 ${sub}</span>`
-          ).join("");
-        }
-      } catch (e) {}
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const resp = await fetch(url, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : null,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch (e) {
+        return null;
+      }
     }
 
-    function selectSubfolder(name) {
-      document.getElementById("subfolderInput").value = name;
-    }
+    async function fetchStatus() {
+      const res = await apiRequest("/api/status");
+      const dot = document.getElementById("statusDot");
+      const stText = document.getElementById("statusText");
 
-    function selectBaseDir(dir) {
-      document.getElementById("saveDirInput").value = dir;
-      checkDiskSpace();
-      probeNow();
-    }
-
-    function debouncedProbe() {
-      clearTimeout(probeTimer);
-      probeTimer = setTimeout(probeNow, 500);
-    }
-
-    async function probeNow() {
-      const rawLinks = document.getElementById("linksInput").value.trim();
-      const saveDir = document.getElementById("saveDirInput").value.trim();
-      const statusEl = document.getElementById("probeStatus");
-      if (!rawLinks) {
-        statusEl.textContent = "Paste links to check size & disk space";
+      if (!res || res.status !== "ok") {
+        dot.className = "dot";
+        stText.innerText = "Offline";
         return;
       }
-      statusEl.textContent = "Checking link metadata & disk space on PC...";
-      try {
-        const res = await apiFetch("/api/probe", {
-          method: "POST",
-          body: JSON.stringify({ links: rawLinks, saveDir })
-        });
-        if (res.status === "ok" && res.data) {
-          const d = res.data;
-          const spaceClass = d.hasEnoughSpace ? "space-ok" : "space-warn";
-          statusEl.innerHTML = `Detected <b>${d.count}</b> link(s) • Required: <b>${d.requiredStr}</b> • Disk Free: <span class="${spaceClass}">${d.freeStr}</span>`;
-        }
-      } catch (e) {
-        statusEl.textContent = "Could not probe links (PC offline)";
+
+      dot.className = "dot online";
+      stText.innerText = "Connected";
+
+      const d = res.data;
+      document.getElementById("statSpeed").innerText = d.globalSpeedStr || "0 B/s";
+      document.getElementById("statActive").innerText = d.activeDownloads || 0;
+      document.getElementById("statDisk").innerText = d.freeSpaceStr || "-";
+      document.getElementById("statAD").innerText = d.alldebridStatus || "Disabled";
+
+      if (!document.getElementById("targetDirInput").value && d.defaultSaveDir) {
+        document.getElementById("targetDirInput").value = d.defaultSaveDir;
       }
+
+      renderTable(d.downloads || []);
     }
 
-    async function submitRemoteDownload() {
-      const links = document.getElementById("linksInput").value.trim();
-      const saveDir = document.getElementById("saveDirInput").value.trim();
+    function renderTable(items) {
+      const tbody = document.getElementById("downloadsTableBody");
+      if (!items || items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 30px;">Queue is empty.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = items.map(it => {
+        const isDone = it.status === "complete";
+        const fillClass = isDone ? "progress-fill done" : "progress-fill";
+        return `
+          <tr>
+            <td style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${it.name}">
+              ${it.name}
+            </td>
+            <td>${it.sizeStr || "-"}</td>
+            <td>${it.statusDisplay || it.status}</td>
+            <td style="color: var(--accent-blue);">${it.speedStr || "-"}</td>
+            <td>${it.etaStr || "~"}</td>
+            <td class="progress-cell">
+              <div class="progress-bar">
+                <div class="${fillClass}" style="width: ${it.progress || 0}%;"></div>
+                <div class="progress-text">${(it.progress || 0).toFixed(0)}%</div>
+              </div>
+            </td>
+            <td class="actions-cell">
+              ${it.status === "active" ? `<button onclick="doAction('pause', '${it.gid}')">Pause</button>` : ""}
+              ${it.status === "paused" ? `<button onclick="doAction('resume', '${it.gid}')">Resume</button>` : ""}
+              <button onclick="doAction('remove', '${it.gid}')" style="color: var(--status-error);">✕</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function submitLinks() {
+      const text = document.getElementById("linksInput").value.trim();
+      if (!text) return;
+
+      const saveDir = document.getElementById("targetDirInput").value.trim();
       const subfolder = document.getElementById("subfolderInput").value.trim();
-      const useAlldebrid = document.getElementById("useAdCheck").checked;
-      if (!links) return;
-      try {
-        const res = await apiFetch("/api/add", {
-          method: "POST",
-          body: JSON.stringify({ links, saveDir, subfolder, useAlldebrid })
-        });
-        if (res.status === "ok") {
-          document.getElementById("linksInput").value = "";
-          document.getElementById("subfolderInput").value = "";
-          document.getElementById("probeStatus").textContent = res.message;
-          pollState();
-        } else {
-          alert(res.message || "Failed to add download");
-        }
-      } catch (e) {
-        alert("Cannot reach PC DMAN server.");
+      const useAD = document.getElementById("useADCheck").checked;
+
+      if (saveDir) {
+        localStorage.setItem("dman_saved_dir", saveDir);
       }
+
+      await apiRequest("/api/add", "POST", { links: text, saveDir, subfolder, useAlldebrid: useAD });
+      document.getElementById("linksInput").value = "";
+      document.getElementById("subfolderInput").value = "";
+      fetchStatus();
     }
 
-    async function sendAction(action, gid) {
-      try {
-        await apiFetch("/api/action", {
-          method: "POST",
-          body: JSON.stringify({ action, gid })
-        });
-        pollState();
-      } catch (e) {}
+    async function doAction(action, gid) {
+      await apiRequest("/api/action", "POST", { action, gid });
+      fetchStatus();
     }
 
-    async function pollState() {
-      try {
-        const res = await apiFetch("/api/status");
-        if (res.status !== "ok") throw new Error(res.message);
-        const st = res.data;
-        document.getElementById("connDot").className = "dot online";
-        document.getElementById("connText").textContent = "PC Online";
-        document.getElementById("adBadge").textContent = "AllDebrid: " + (st.alldebridEnabled ? st.alldebridStatus : "Off");
-        document.getElementById("stSpeed").textContent = st.globalSpeedStr + " (ETA: " + st.globalEtaStr + ")";
-        document.getElementById("stTasks").textContent = `${st.activeDownloads} / ${st.totalPackages}`;
-        document.getElementById("stBytes").textContent = `${st.loadedBytesStr} / ${st.totalBytesStr}`;
-
-        if (!initializedDir && st.defaultSaveDir) {
-          document.getElementById("saveDirInput").value = st.defaultSaveDir;
-          document.getElementById("stFree").textContent = st.freeSpaceStr + " Free";
-          initializedDir = true;
-          checkDiskSpace();
-        }
-
-        const recentEl = document.getElementById("recentDirsChips");
-        recentEl.innerHTML = (st.recentDirs || []).map(d =>
-          `<span class="chip" onclick="selectBaseDir('${d.replace(/\\/g, "/").replace(/'/g, "\\'")}')">⚡ ${d}</span>`
-        ).join("");
-
-        const tbody = document.getElementById("downloadsBody");
-        const rows = st.downloads || [];
-        if (rows.length === 0) {
-          tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color: var(--text-muted);">No downloads in queue or history.</td></tr>`;
-        } else {
-          tbody.innerHTML = rows.map(item => `
-            <tr>
-              <td style="font-weight:600; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${item.name}</td>
-              <td>${item.sizeStr}</td>
-              <td>${item.statusDisplay}</td>
-              <td style="color:var(--accent-blue); font-weight:700;">${item.speedStr || "-"}</td>
-              <td>${item.etaStr || "~"}</td>
-              <td>
-                <div class="pbar">
-                  <div class="pfill" style="width:${item.progress || 0}%;"></div>
-                  <div class="ptxt">${Math.round(item.progress || 0)}%</div>
-                </div>
-              </td>
-              <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${item.saveDir}</td>
-              <td>
-                <button onclick="sendAction('resume', '${item.gid}')">▶</button>
-                <button onclick="sendAction('pause', '${item.gid}')">⏸</button>
-                <button class="danger" onclick="sendAction('remove', '${item.gid}')">✕</button>
-              </td>
-            </tr>
-          `).join("");
-        }
-      } catch (e) {
-        document.getElementById("connDot").className = "dot";
-        document.getElementById("connText").textContent = "PC Offline";
-      }
-    }
-
-    setInterval(pollState, 1200);
-    pollState();
+    // Auto-refresh every 2 seconds
+    setInterval(fetchStatus, 2000);
+    fetchStatus();
   </script>
 </body>
 </html>
